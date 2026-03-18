@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# tk-dashboard — Inicia o dashboard web do tktk
+# Uso: tk-dashboard [porta]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PORT="${1:-8095}"
+
+echo "Iniciando tktk Dashboard na porta ${PORT}..."
+exec python3 "${PROJECT_DIR}/dashboard/server.py" "$PORT"

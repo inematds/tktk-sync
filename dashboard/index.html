@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tktk — TikTok Sync Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; }
+
+  .header { background: #1a1a2e; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #fe2c55; }
+  .header h1 { font-size: 20px; color: #fff; cursor: pointer; }
+  .header h1 span { color: #fe2c55; }
+  .header .actions { display: flex; gap: 8px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 20px 24px; }
+  .stat-card { background: #1a1a2e; border-radius: 8px; padding: 16px; text-align: center; }
+  .stat-card .number { font-size: 28px; font-weight: 700; color: #fe2c55; }
+  .stat-card .label { font-size: 12px; color: #888; margin-top: 4px; }
+
+  .tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid #333; }
+  .tab { padding: 10px 20px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: #ccc; }
+  .tab.active { color: #fe2c55; border-bottom-color: #fe2c55; }
+
+  .content { padding: 20px 24px; }
+
+  /* Sync panel */
+  .sync-panel { background: #1a1a2e; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .sync-panel h3 { margin-bottom: 12px; }
+  .sync-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .sync-form .field { display: flex; flex-direction: column; gap: 4px; }
+  .sync-form label { font-size: 12px; color: #888; }
+  .sync-form input, .sync-form select { background: #0f0f0f; border: 1px solid #333; border-radius: 4px; padding: 8px 12px; color: #e0e0e0; font-size: 14px; }
+  .sync-form input:focus, .sync-form select:focus { border-color: #fe2c55; outline: none; }
+
+  /* Buttons */
+  .btn { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+  .btn-primary { background: #fe2c55; color: #fff; }
+  .btn-primary:hover { background: #e0264c; }
+  .btn-secondary { background: #333; color: #e0e0e0; }
+  .btn-secondary:hover { background: #444; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-icon { background: none; border: 1px solid #444; color: #ccc; padding: 6px 12px; font-size: 16px; }
+  .btn-icon:hover { border-color: #fe2c55; color: #fe2c55; }
+
+  /* Table */
+  .table-container { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #1a1a2e; padding: 10px 12px; text-align: left; color: #888; font-weight: 600; white-space: nowrap; position: sticky; top: 0; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1a1a2e; }
+  tr:hover td { background: #1a1a2e40; }
+
+  /* Status badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-downloaded { background: #2d3748; color: #63b3ed; }
+  .badge-analyzed { background: #2d3748; color: #fbd38d; }
+  .badge-published { background: #22543d; color: #68d391; }
+  .badge-error { background: #742a2a; color: #fc8181; }
+
+  /* Config page */
+  .page { display: none; }
+  .page.active { display: block; }
+
+  .config-section { background: #1a1a2e; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .config-section h3 { margin-bottom: 16px; font-size: 16px; color: #fe2c55; }
+  .config-section h4 { margin: 16px 0 8px; font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+
+  .config-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .config-row label { min-width: 140px; font-size: 13px; color: #aaa; }
+  .config-row input, .config-row select { flex: 1; background: #0f0f0f; border: 1px solid #333; border-radius: 4px; padding: 8px 12px; color: #e0e0e0; font-size: 14px; }
+  .config-row input:focus, .config-row select:focus { border-color: #fe2c55; outline: none; }
+  .config-row .hint { font-size: 11px; color: #555; margin-left: 152px; margin-top: -6px; margin-bottom: 8px; }
+
+  .config-row input[type="password"] { font-family: monospace; letter-spacing: 2px; }
+  .toggle-vis { background: none; border: none; color: #666; cursor: pointer; font-size: 12px; padding: 4px 8px; }
+  .toggle-vis:hover { color: #fe2c55; }
+
+  /* Prompt editor */
+  .prompt-editor { width: 100%; min-height: 250px; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 12px; color: #e0e0e0; font-family: 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.5; resize: vertical; }
+  .prompt-editor:focus { border-color: #fe2c55; outline: none; }
+  .prompt-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+
+  /* Hour picker */
+  .hour-picker { display: grid; grid-template-columns: repeat(12, 1fr); gap: 4px; margin-top: 6px; }
+  @media (max-width: 800px) { .hour-picker { grid-template-columns: repeat(8, 1fr); } }
+  .hour-btn { padding: 6px 0; text-align: center; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: #0f0f0f; border: 1px solid #333; color: #888; transition: all 0.15s; user-select: none; }
+  .hour-btn:hover { border-color: #fe2c55; color: #e0e0e0; }
+  .hour-btn.active { background: #fe2c55; border-color: #fe2c55; color: white; }
+  .hour-picker-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .hour-picker-header label { font-size: 12px; color: #888; }
+  .hour-picker-actions { display: flex; gap: 6px; }
+  .hour-picker-actions button { padding: 2px 8px; font-size: 11px; background: #0f0f0f; border: 1px solid #333; color: #888; border-radius: 4px; cursor: pointer; }
+  .hour-picker-actions button:hover { color: #e0e0e0; background: #333; }
+  .hour-summary { font-size: 12px; color: #888; margin-top: 6px; }
+  .hour-summary strong { color: #e0e0e0; }
+
+  /* Flow bar */
+  .flow-bar { display: flex; align-items: center; gap: 12px; background: #1a1a2e; border-radius: 8px; padding: 12px 20px; }
+  .flow-node { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+  .flow-node.origin { background: #1e1e3f; border: 1px solid #fe2c55; color: #fe2c55; }
+  .flow-node.dest { background: #1e1e3f; border: 1px solid #444; color: #ccc; }
+  .flow-node.dest.active { border-color: #68d391; color: #68d391; }
+  .flow-node.dest.inactive { opacity: 0.4; }
+  .flow-arrow { color: #555; font-size: 18px; }
+
+  /* Sync log */
+  .sync-log { background: #0a0a0a; border-radius: 4px; padding: 12px; font-family: 'Fira Code', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; color: #aaa; margin-top: 12px; }
+
+  .hidden { display: none; }
+  .saved-msg { color: #68d391; font-size: 12px; opacity: 0; transition: opacity 0.3s; }
+  .saved-msg.show { opacity: 1; }
+
+  @media (max-width: 768px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .config-row { flex-direction: column; align-items: stretch; }
+    .config-row label { min-width: unset; }
+    .sync-form { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1 onclick="showPage('main')"><span>tktk</span> Dashboard</h1>
+  <div class="actions">
+    <button class="btn btn-secondary btn-sm" onclick="loadAll()">Atualizar</button>
+    <button class="btn btn-icon btn-sm" onclick="showPage('config')" title="Configurações">&#9881;</button>
+  </div>
+</div>
+
+<!-- ==================== MAIN PAGE ==================== -->
+<div class="page active" id="page-main">
+
+  <div class="stats" id="stats"></div>
+
+  <!-- Origem → Destinos -->
+  <div id="flow-bar" style="padding:0 24px 12px;"></div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="videos" onclick="switchTab('videos')">Videos</div>
+    <div class="tab" data-tab="publicados" onclick="switchTab('publicados')">Publicados</div>
+  </div>
+
+  <!-- Tab: Videos -->
+  <div class="content tab-content" id="tab-videos">
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Titulo</th>
+            <th>Canal</th>
+            <th>Data</th>
+            <th>Dur.</th>
+            <th>Views</th>
+            <th>Likes</th>
+            <th>Status</th>
+            <th>Sync</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody id="videos-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Tab: Publicados -->
+  <div class="content tab-content hidden" id="tab-publicados">
+    <p style="color:#888">Publicações aparecerão aqui após o upload para YouTube/Instagram.</p>
+  </div>
+
+</div>
+
+<!-- ==================== CONFIG PAGE ==================== -->
+<div class="page" id="page-config">
+
+  <div style="padding: 20px 24px 0;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+      <h2 style="color:#fff;">Configurações</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="saved-msg" id="global-saved" style="margin-right:8px;">Salvo na planilha</span>
+        <button class="btn btn-primary btn-sm" onclick="saveAllConfig()">Salvar tudo</button>
+        <button class="btn btn-secondary btn-sm" onclick="showPage('main')">&larr; Voltar</button>
+      </div>
+    </div>
+
+    <!-- Origem e Destinos -->
+    <div class="config-section">
+      <h3>Origem e Destinos</h3>
+      <h4>Origem (TikTok)</h4>
+      <div class="config-row">
+        <label>Canal TikTok</label>
+        <input type="text" id="cfg-tiktok-channel" placeholder="@lnema.tia" onchange="saveConfig('tiktok_channel', this.value)">
+      </div>
+      <h4>Destinos</h4>
+      <div class="config-row">
+        <label>YouTube Shorts</label>
+        <select id="cfg-dest-youtube" onchange="saveConfig('dest_youtube', this.value)">
+          <option value="true">Ativo</option>
+          <option value="false">Desativado</option>
+        </select>
+      </div>
+      <div class="config-row">
+        <label>Canal YouTube</label>
+        <input type="text" id="cfg-youtube-channel" placeholder="@InemaTIA" onchange="saveConfig('youtube_channel_name', this.value)">
+      </div>
+      <div class="config-row">
+        <label>Instagram Reels</label>
+        <select id="cfg-dest-instagram" onchange="saveConfig('dest_instagram', this.value)">
+          <option value="false">Desativado</option>
+          <option value="true">Ativo</option>
+        </select>
+      </div>
+      <div class="config-row">
+        <label>Conta Instagram</label>
+        <input type="text" id="cfg-instagram-account" placeholder="@conta" onchange="saveConfig('instagram_account', this.value)">
+      </div>
+    </div>
+
+    <!-- Sync Automático -->
+    <div class="config-section">
+      <h3>Sync Automático de Novos</h3>
+      <p style="color:#888;font-size:13px;margin-bottom:14px;">Busca 1x por dia vídeos novos do TikTok. Só baixa os que ainda não foram sincronizados.</p>
+      <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field">
+          <label style="font-size:12px;color:#888">Status</label>
+          <select id="cfg-sync-paused" style="background:#0f0f0f;border:1px solid #333;border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:14px" onchange="saveConfig('pipeline_sync_paused', this.value); updateSyncAutoLabel()">
+            <option value="false">Ativo</option>
+            <option value="true">Desativado</option>
+          </select>
+        </div>
+        <div class="field">
+          <label style="font-size:12px;color:#888">Horário diário</label>
+          <input type="time" id="cfg-sync-time" value="12:00" style="background:#0f0f0f;border:1px solid #333;border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:14px" onchange="saveSyncTime()">
+        </div>
+        <span id="sync-auto-label" style="font-size:12px;padding-bottom:10px;"></span>
+      </div>
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid #333;">
+        <button class="btn btn-primary" id="sync-new-btn" onclick="syncAllNew()">Executar Sync Agora</button>
+        <span style="font-size:12px;color:#888;margin-left:12px;">Roda imediatamente sem esperar o horário</span>
+      </div>
+      <div class="sync-log hidden" id="sync-log-auto"></div>
+    </div>
+
+    <!-- Sync Manual -->
+    <div class="config-section">
+      <h3>Sync Manual (avançado)</h3>
+      <p style="color:#888;font-size:13px;margin-bottom:14px;">Para sincronizar um período ou quantidade específica.</p>
+      <div class="sync-form">
+        <div class="field">
+          <label>Canal</label>
+          <input type="text" id="sync-channel" placeholder="@lnema.tia" value="@lnema.tia">
+        </div>
+        <div class="field">
+          <label>Quantidade</label>
+          <input type="number" id="sync-last" value="10" min="1" max="500" style="width:80px">
+        </div>
+        <div class="field">
+          <label>De</label>
+          <input type="date" id="sync-since">
+        </div>
+        <div class="field">
+          <label>Até</label>
+          <input type="date" id="sync-until">
+        </div>
+        <div class="field">
+          <label>Ordem</label>
+          <select id="sync-order">
+            <option value="newest">Mais novos primeiro</option>
+            <option value="oldest">Mais antigos primeiro</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="sync-btn" onclick="startSync()">Sincronizar</button>
+      </div>
+      <div class="sync-log hidden" id="sync-log"></div>
+    </div>
+
+    <!-- Geral -->
+    <div class="config-section">
+      <h3>Geral</h3>
+      <div class="config-row">
+        <label>Privacy padrão</label>
+        <select id="cfg-privacy" onchange="saveConfig('privacy_padrao', this.value)">
+          <option value="unlisted">Unlisted</option>
+          <option value="public">Public</option>
+          <option value="private">Private</option>
+        </select>
+      </div>
+      <div class="config-row">
+        <label>Max vídeos por sync</label>
+        <input type="number" id="cfg-sync-max" value="10" min="1" max="100" style="max-width:80px" onchange="saveConfig('sync_max_por_vez', this.value)">
+      </div>
+      <div class="config-row">
+        <label>Max vídeos por publicação</label>
+        <input type="number" id="cfg-pub-max" value="3" min="1" max="50" style="max-width:80px" onchange="saveConfig('pub_max_por_vez', this.value)">
+      </div>
+    </div>
+
+    <!-- Horários Publish -->
+    <div class="config-section">
+      <h3>Horários de Publicação</h3>
+      <div class="config-row">
+        <label>Pipeline publish</label>
+        <select id="cfg-pub-paused" onchange="saveConfig('pipeline_pub_paused', this.value)">
+          <option value="true">Pausado</option>
+          <option value="false">Ativo</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="hour-picker-header">
+          <label>Horários de publicação (clique para ativar/desativar)</label>
+          <div class="hour-picker-actions">
+            <button onclick="hourPickerSelectAll('pub')">Todas</button>
+            <button onclick="hourPickerClearAll('pub')">Limpar</button>
+          </div>
+        </div>
+        <div class="hour-picker" id="pubHourPicker"></div>
+        <div class="hour-summary" id="pubSummary"></div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;">
+          <label style="font-size:12px;color:#888">Minuto exato:</label>
+          <input type="number" id="cfgPubMinuto" min="0" max="59" value="0" style="width:60px;background:#0f0f0f;border:1px solid #333;border-radius:4px;padding:6px;color:#e0e0e0" onchange="saveHourConfig('pub')">
+          <span style="font-size:11px;color:#555">Ex: 15 → roda em HH:15</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- API de IA -->
+    <div class="config-section">
+      <h3>Provedor de IA (Análise de Conteúdo)</h3>
+
+      <div class="config-row">
+        <label>Provedor ativo</label>
+        <select id="cfg-ai-mode" onchange="saveConfig('ai_mode', this.value)">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="piramyd">Piramyd API</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+      </div>
+
+      <div class="config-row">
+        <label>Modelo</label>
+        <input type="text" id="cfg-ai-model" placeholder="claude-sonnet-4-5-20250514" onchange="saveConfig('ai_model', this.value)">
+      </div>
+
+      <h4>Anthropic (Claude)</h4>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-anthropic-key" placeholder="sk-ant-..." onchange="saveConfig('anthropic_api_key', this.value)">
+        <button class="toggle-vis" onclick="toggleVis('cfg-anthropic-key')">mostrar</button>
+      </div>
+
+      <h4>Piramyd API</h4>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-piramyd-key" placeholder="sk-..." onchange="saveConfig('piramyd_api_key', this.value)">
+        <button class="toggle-vis" onclick="toggleVis('cfg-piramyd-key')">mostrar</button>
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-piramyd-url" placeholder="https://api.piramyd.com/v1" onchange="saveConfig('piramyd_base_url', this.value)">
+      </div>
+
+      <h4>OpenRouter</h4>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-openrouter-key" placeholder="sk-or-..." onchange="saveConfig('openrouter_api_key', this.value)">
+        <button class="toggle-vis" onclick="toggleVis('cfg-openrouter-key')">mostrar</button>
+      </div>
+
+      <h4>Ollama (Local)</h4>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-ollama-url" placeholder="http://localhost:11434" onchange="saveConfig('ollama_base_url', this.value)">
+      </div>
+      <div class="config-row">
+        <label>Modelo</label>
+        <input type="text" id="cfg-ollama-model" placeholder="llama3.2-vision" onchange="saveConfig('ollama_model', this.value)">
+      </div>
+
+      <span class="saved-msg" id="api-saved">Salvo</span>
+    </div>
+
+    <!-- Prompt de análise -->
+    <div class="config-section">
+      <h3>Prompt de Análise</h3>
+      <p style="color:#888; font-size:13px; margin-bottom:12px;">Este prompt será usado para analisar o conteúdo dos vídeos e gerar títulos e descrições para YouTube Shorts e Instagram Reels.</p>
+      <textarea class="prompt-editor" id="cfg-prompt" spellcheck="false"></textarea>
+      <div class="prompt-actions">
+        <span class="saved-msg" id="prompt-saved">Salvo</span>
+        <button class="btn btn-secondary btn-sm" onclick="resetPrompt()">Restaurar padrão</button>
+        <button class="btn btn-primary btn-sm" onclick="savePrompt()">Salvar prompt</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API = '';
+
+const DEFAULT_PROMPT = `Você é um especialista em conteúdo para redes sociais.
+
+Analise o vídeo do TikTok abaixo e gere conteúdo otimizado para republicação.
+
+DADOS DO VÍDEO ORIGINAL:
+- Título: {title}
+- Descrição: {description}
+- Duração: {duration}s
+- Views: {view_count} | Likes: {like_count}
+
+GERE (em JSON):
+{
+  "titulo_youtube": "Título para YouTube Shorts (max 100 chars, atrativo, com emoji)",
+  "descricao_youtube": "Descrição para YouTube (2-3 parágrafos, com hashtags relevantes, CTA)",
+  "titulo_instagram": "Título/caption para Instagram Reels (max 2200 chars, com emojis e hashtags)",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+  "categoria": "número da categoria YouTube (22=People, 24=Entertainment, 27=Education, 28=Science)",
+  "resumo": "Resumo de 1 linha do conteúdo do vídeo"
+}
+
+REGRAS:
+- Títulos devem ser atrativos e gerar curiosidade
+- Descrições devem ser naturais, não parecer geradas por IA
+- Tags relevantes ao conteúdo
+- Manter o tom e estilo do vídeo original
+- Incluir hashtags populares relacionadas
+- Responda APENAS com o JSON, sem texto adicional`;
+
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  return res.json();
+}
+
+// --- Pages ---
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  if (name === 'config') loadConfigPage();
+}
+
+// --- Config Page ---
+async function loadConfigPage() {
+  const config = await api('/api/config');
+
+  // AI
+  setVal('cfg-ai-mode', config.ai_mode || 'piramyd');
+  setVal('cfg-ai-model', config.ai_model || 'claude-sonnet-4-5-20250514');
+  setVal('cfg-anthropic-key', config.anthropic_api_key || '');
+  setVal('cfg-piramyd-key', config.piramyd_api_key || '');
+  setVal('cfg-piramyd-url', config.piramyd_base_url || 'https://api.piramyd.cloud/v1');
+  setVal('cfg-openrouter-key', config.openrouter_api_key || '');
+  setVal('cfg-ollama-url', config.ollama_base_url || 'http://localhost:11434');
+  setVal('cfg-ollama-model', config.ollama_model || 'llama3.2-vision');
+
+  // Origem/Destinos
+  setVal('cfg-tiktok-channel', config.tiktok_channel || '@lnema.tia');
+  setVal('cfg-dest-youtube', config.dest_youtube || 'true');
+  setVal('cfg-youtube-channel', config.youtube_channel_name || '@InemaTIA');
+  setVal('cfg-dest-instagram', config.dest_instagram || 'false');
+  setVal('cfg-instagram-account', config.instagram_account || '');
+
+  // Geral
+  setVal('cfg-privacy', config.privacy_padrao || 'unlisted');
+  setVal('cfg-sync-max', config.sync_max_por_vez || '10');
+  setVal('cfg-pub-max', config.pub_max_por_vez || '3');
+  setVal('cfg-sync-paused', config.pipeline_sync_paused || 'true');
+  setVal('cfg-pub-paused', config.pipeline_pub_paused || 'true');
+
+  // Sync time (campo simples HH:MM)
+  setVal('cfg-sync-time', config.sync_horarios || '12:00');
+
+  // Publish hour picker
+  const pubMinMatch = (config.pub_horarios || '').match(/:(\d{2})/);
+  if (pubMinMatch) setVal('cfgPubMinuto', parseInt(pubMinMatch[1]));
+  hourState.pub = stringToHours(config.pub_horarios || '');
+  buildHourPicker('pub');
+
+  updateSyncAutoLabel();
+
+  // Prompt
+  const promptRes = await api('/api/prompt');
+  document.getElementById('cfg-prompt').value = promptRes.prompt || DEFAULT_PROMPT;
+}
+
+function setVal(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val;
+}
+
+async function saveConfig(key, value) {
+  await api('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({key, value})
+  });
+  flashSaved('api-saved');
+}
+
+async function savePrompt() {
+  const prompt = document.getElementById('cfg-prompt').value;
+  await api('/api/prompt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt})
+  });
+  flashSaved('prompt-saved');
+}
+
+function resetPrompt() {
+  document.getElementById('cfg-prompt').value = DEFAULT_PROMPT;
+}
+
+function flashSaved(id) {
+  const el = document.getElementById(id);
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+function toggleVis(id) {
+  const el = document.getElementById(id);
+  const btn = el.nextElementSibling;
+  if (el.type === 'password') {
+    el.type = 'text';
+    btn.textContent = 'ocultar';
+  } else {
+    el.type = 'password';
+    btn.textContent = 'mostrar';
+  }
+}
+
+// --- Main Page ---
+async function loadStatus() {
+  const s = await api('/api/status');
+  document.getElementById('stats').innerHTML = `
+    <div class="stat-card"><div class="number">${s.total_videos}</div><div class="label">Total Videos</div></div>
+    <div class="stat-card"><div class="number">${s.downloaded}</div><div class="label">Baixados</div></div>
+    <div class="stat-card"><div class="number">${s.analyzed}</div><div class="label">Analisados</div></div>
+    <div class="stat-card"><div class="number">${s.published}</div><div class="label">Publicados</div></div>
+    <div class="stat-card"><div class="number">${s.pending}</div><div class="label">Pendentes</div></div>
+  `;
+}
+
+async function loadVideos() {
+  const videos = await api('/api/videos');
+  const tbody = document.getElementById('videos-table');
+  if (!videos.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#555;padding:40px;">Nenhum vídeo sincronizado ainda. Use o painel acima para sincronizar.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = videos.map(v => `
+    <tr>
+      <td><code style="font-size:11px">${(v.video_id || '').slice(-8)}</code></td>
+      <td title="${v.titulo || ''}">${(v.titulo || '').slice(0, 50)}${(v.titulo||'').length > 50 ? '...' : ''}</td>
+      <td>${v.canal || ''}</td>
+      <td>${v.data_upload || ''}</td>
+      <td>${v.duracao || ''}s</td>
+      <td>${formatNumber(v.views)}</td>
+      <td>${formatNumber(v.likes)}</td>
+      <td><span class="badge badge-${v.status || 'downloaded'}">${v.status || 'downloaded'}</span></td>
+      <td style="font-size:11px">${v.data_sync || ''}</td>
+      <td>
+        <a href="${v.url_tiktok || '#'}" target="_blank" class="btn btn-secondary btn-sm">TikTok</a>
+        ${v.status === 'downloaded' ? `<button class="btn btn-primary btn-sm" style="margin-left:4px" onclick="analyzeVideo('${v.video_id}')">Analisar</button>` : ''}
+        ${v.status === 'analyzed' ? `<button class="btn btn-sm" style="margin-left:4px;background:#22543d;color:#68d391" onclick="publishVideo('${v.video_id}')">Publicar</button>` : ''}
+        ${v.status === 'published' ? `<span class="badge badge-published" style="margin-left:4px">Publicado</span>` : ''}
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function analyzeVideo(videoId) {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '...';
+  const res = await api('/api/analyze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: videoId})
+  });
+  if (res.ok) {
+    btn.textContent = 'OK';
+    setTimeout(() => loadAll(), 2000);
+  } else {
+    btn.textContent = 'Erro';
+    btn.style.background = '#742a2a';
+    alert(res.error || 'Erro na análise');
+  }
+}
+
+function updateSyncAutoLabel() {
+  const paused = document.getElementById('cfg-sync-paused').value === 'true';
+  const time = document.getElementById('cfg-sync-time').value;
+  const el = document.getElementById('sync-auto-label');
+  if (paused) {
+    el.innerHTML = '<span style="color:#fc8181">Desativado</span>';
+  } else {
+    el.innerHTML = `<span style="color:#68d391">Sync diário às ${time}</span>`;
+  }
+}
+
+function saveSyncTime() {
+  const time = document.getElementById('cfg-sync-time').value;
+  saveConfig('sync_horarios', time);
+  updateSyncAutoLabel();
+}
+
+async function saveAllConfig() {
+  // Força salvar todos os campos visíveis
+  const fields = [
+    ['tiktok_channel', 'cfg-tiktok-channel'],
+    ['youtube_channel_name', 'cfg-youtube-channel'],
+    ['dest_youtube', 'cfg-dest-youtube'],
+    ['dest_instagram', 'cfg-dest-instagram'],
+    ['instagram_account', 'cfg-instagram-account'],
+    ['ai_mode', 'cfg-ai-mode'],
+    ['ai_model', 'cfg-ai-model'],
+    ['privacy_padrao', 'cfg-privacy'],
+    ['sync_max_por_vez', 'cfg-sync-max'],
+    ['pub_max_por_vez', 'cfg-pub-max'],
+    ['pipeline_pub_paused', 'cfg-pub-paused'],
+  ];
+  for (const [key, id] of fields) {
+    const el = document.getElementById(id);
+    if (el) await saveConfig(key, el.value);
+  }
+  saveSyncTime();
+  saveHourConfig('pub');
+  await savePrompt();
+  flashSaved('global-saved');
+}
+
+async function syncAllNew() {
+  const config = await api('/api/config');
+  const channel = config.tiktok_channel || '@lnema.tia';
+  const btn = document.getElementById('sync-new-btn');
+  const log = document.getElementById('sync-log-auto');
+
+  btn.disabled = true;
+  btn.textContent = 'Sincronizando...';
+  log.classList.remove('hidden');
+  log.textContent = `Buscando todos os vídeos novos de ${channel}...\n`;
+
+  const res = await api('/api/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel, last: '500', since: '', until: '', order: 'newest'})
+  });
+
+  log.textContent += res.message + '\n';
+
+  const poll = setInterval(async () => {
+    const status = await api('/api/sync-status');
+    if (status.finished_at) {
+      clearInterval(poll);
+      log.textContent += '\n' + (status.stdout || '');
+      if (status.stderr) log.textContent += '\nERRO: ' + status.stderr;
+      btn.disabled = false;
+      btn.textContent = 'Executar Sync Agora';
+      loadAll();
+    }
+  }, 3000);
+}
+
+async function publishVideo(videoId) {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Enviando...';
+  const res = await api('/api/publish', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: videoId, platform: 'youtube'})
+  });
+  if (res.ok) {
+    btn.textContent = 'Enviado';
+    btn.style.opacity = '0.7';
+    setTimeout(() => loadAll(), 5000);
+  } else {
+    btn.textContent = 'Erro';
+    btn.style.background = '#742a2a';
+    alert(res.error || 'Erro na publicação');
+  }
+}
+
+async function startSync() {
+  const channel = document.getElementById('sync-channel').value;
+  const last = document.getElementById('sync-last').value;
+  const since = document.getElementById('sync-since').value;
+  const until = document.getElementById('sync-until').value;
+  const order = document.getElementById('sync-order').value;
+  const btn = document.getElementById('sync-btn');
+  const log = document.getElementById('sync-log');
+
+  btn.disabled = true;
+  btn.textContent = 'Sincronizando...';
+  log.classList.remove('hidden');
+  const orderLabel = order === 'oldest' ? 'mais antigos primeiro' : 'mais novos primeiro';
+  const periodLabel = since || until ? ` | ${since || '...'} a ${until || '...'}` : '';
+  log.textContent = `Iniciando sync de ${channel} (${last} videos, ${orderLabel}${periodLabel})...\n`;
+
+  const res = await api('/api/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel, last, since, until, order})
+  });
+
+  log.textContent += res.message + '\n';
+
+  const poll = setInterval(async () => {
+    const status = await api('/api/sync-status');
+    if (status.finished_at) {
+      clearInterval(poll);
+      log.textContent += '\n' + (status.stdout || '');
+      if (status.stderr) log.textContent += '\nERRO: ' + status.stderr;
+      btn.disabled = false;
+      btn.textContent = 'Sincronizar';
+      loadAll();
+    }
+  }, 3000);
+}
+
+function formatNumber(n) {
+  if (!n || n === '0') return '-';
+  n = parseInt(n);
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+}
+
+async function loadFlowBar() {
+  try {
+    const config = await api('/api/config');
+    const origin = config.tiktok_channel || '@lnema.tia';
+    const ytActive = config.dest_youtube !== 'false';
+    const ytName = config.youtube_channel_name || '@InemaTIA';
+    const igActive = config.dest_instagram === 'true';
+    const igName = config.instagram_account || 'Instagram';
+
+    document.getElementById('flow-bar').innerHTML = `
+      <div class="flow-bar">
+        <div class="flow-node origin">TikTok ${origin}</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-node dest ${ytActive ? 'active' : 'inactive'}">YouTube ${ytName}</div>
+        ${igActive ? `<div class="flow-node dest active">Instagram ${igName}</div>` : ''}
+      </div>
+    `;
+  } catch(e) {}
+}
+
+async function loadAll() {
+  try { await loadStatus(); } catch(e) { console.error('status:', e); }
+  try { await loadFlowBar(); } catch(e) { console.error('flow:', e); }
+  try { await loadVideos(); } catch(e) { console.error('videos:', e); }
+}
+
+// --- Hour Picker ---
+const hourState = { sync: new Set(), pub: new Set() };
+
+function buildHourPicker(name) {
+  const container = document.getElementById(name + 'HourPicker');
+  container.innerHTML = '';
+  for (let h = 0; h < 24; h++) {
+    const label = String(h).padStart(2, '0') + ':00';
+    const btn = document.createElement('div');
+    btn.className = 'hour-btn' + (hourState[name].has(h) ? ' active' : '');
+    btn.textContent = label;
+    btn.onclick = () => {
+      if (hourState[name].has(h)) hourState[name].delete(h);
+      else hourState[name].add(h);
+      btn.classList.toggle('active');
+      updateHourSummary(name);
+      saveHourConfig(name);
+    };
+    container.appendChild(btn);
+  }
+  updateHourSummary(name);
+}
+
+function updateHourSummary(name) {
+  const el = document.getElementById(name + 'Summary');
+  const count = hourState[name].size;
+  const minId = name === 'sync' ? 'cfgSyncMinuto' : 'cfgPubMinuto';
+  const minuto = String(document.getElementById(minId).value || 0).padStart(2, '0');
+  if (count === 0) {
+    el.innerHTML = 'Nenhum horário selecionado';
+  } else if (count === 24) {
+    el.innerHTML = `<strong>24x por dia</strong> — a cada hora no minuto :${minuto}`;
+  } else {
+    const sorted = [...hourState[name]].sort((a,b) => a-b);
+    const labels = sorted.map(h => String(h).padStart(2,'0') + ':' + minuto);
+    el.innerHTML = `<strong>${count}x por dia</strong> — ${labels.join(', ')}`;
+  }
+}
+
+function hourPickerSelectAll(name) {
+  for (let h = 0; h < 24; h++) hourState[name].add(h);
+  buildHourPicker(name);
+  saveHourConfig(name);
+}
+
+function hourPickerClearAll(name) {
+  hourState[name].clear();
+  buildHourPicker(name);
+  saveHourConfig(name);
+}
+
+function hoursToString(name) {
+  const minId = name === 'sync' ? 'cfgSyncMinuto' : 'cfgPubMinuto';
+  const minuto = String(document.getElementById(minId).value || 0).padStart(2, '0');
+  const sorted = [...hourState[name]].sort((a,b) => a-b);
+  return sorted.map(h => String(h).padStart(2,'0') + ':' + minuto).join(',');
+}
+
+function stringToHours(str) {
+  const set = new Set();
+  if (!str) return set;
+  str.split(',').forEach(t => {
+    t = t.trim();
+    const m = t.match(/^(\d{1,2}):/);
+    if (m) set.add(parseInt(m[1]));
+  });
+  return set;
+}
+
+function saveHourConfig(name) {
+  const key = name === 'sync' ? 'sync_horarios' : 'pub_horarios';
+  saveConfig(key, hoursToString(name));
+}
+
+// Init
+loadAll();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

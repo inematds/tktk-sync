@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# tk-sync — Sincroniza vídeos de um canal TikTok (download sem marca d'água)
+# Registra dados na planilha Google Sheets (aba VIDEOS)
+#
+# Uso:
+#   tk-sync <@usuario> [opções]
+#
+# Exemplos:
+#   tk-sync @canal                          # Baixa todos os vídeos novos
+#   tk-sync @canal --last 10               # Últimos 10 vídeos
+#   tk-sync @canal --since 2025-01-01      # Vídeos desde uma data
+#   tk-sync @canal --dry-run               # Só lista, não baixa
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$HOME/.deno/bin:/usr/bin:$HOME/.npm-global/bin:$PATH"
+
+# --- Config ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${PROJECT_DIR}/config/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+# Carrega lib de Google Sheets
+source "${SCRIPT_DIR}/lib-sheets.sh"
+
+VIDEOS_DIR="${VIDEOS_DIR:-${PROJECT_DIR}/videos}"
+CHANNEL=""
+LAST=""
+SINCE=""
+UNTIL=""
+ORDER="newest"
+DRY_RUN=false
+
+# Planilha: aba VIDEOS
+# Colunas: video_id | titulo | descricao | canal | data_upload | duracao | views | likes | comments | shares | url_tiktok | status | data_sync | observacoes
+SHEET_VIDEOS="VIDEOS"
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --last)       LAST="$2"; shift 2 ;;
+    --since)      SINCE="$2"; shift 2 ;;
+    --until)      UNTIL="$2"; shift 2 ;;
+    --order)      ORDER="$2"; shift 2 ;;
+    --dry-run)    DRY_RUN=true; shift ;;
+    --videos-dir) VIDEOS_DIR="$2"; shift 2 ;;
+    --help|-h)
+      head -13 "$0" | tail -11
+      echo ""
+      echo "Opções:"
+      echo "  --last N        Baixar apenas os N vídeos do TikTok"
+      echo "  --since DATA    Filtrar vídeos desde DATA (YYYY-MM-DD)"
+      echo "  --until DATA    Filtrar vídeos até DATA (YYYY-MM-DD)"
+      echo "  --order ORDEM   newest (padrão) ou oldest"
+      echo "  --dry-run       Só lista vídeos, não baixa"
+      echo "  --videos-dir    Diretório de destino (padrão: ./videos)"
+      exit 0
+      ;;
+    -*)
+      echo "Erro: opção desconhecida: $1" >&2
+      exit 1
+      ;;
+    *)
+      CHANNEL="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$CHANNEL" ]]; then
+  echo "Erro: forneça o @usuario do TikTok" >&2
+  echo "Uso: tk-sync @canal [--last N] [--since DATA] [--dry-run]" >&2
+  exit 1
+fi
+
+# Garante que começa com @
+[[ "$CHANNEL" != @* ]] && CHANNEL="@${CHANNEL}"
+
+TIKTOK_URL="https://www.tiktok.com/${CHANNEL}"
+mkdir -p "$VIDEOS_DIR"
+
+# --- Funções auxiliares ---
+
+load_synced_ids() {
+  # Carrega IDs já sincronizados da planilha (coluna A)
+  SYNCED_IDS=$(sheets_get "${SHEET_VIDEOS}!A:A" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for row in data.get('values', []):
+        if row:
+            print(row[0])
+except:
+    pass
+" 2>/dev/null)
+}
+
+is_synced() {
+  local video_id="$1"
+  echo "$SYNCED_IDS" | grep -qF "$video_id"
+}
+
+register_in_sheet() {
+  # Registra vídeo na planilha
+  local video_id="$1"
+  local title="$2"
+  local description="$3"
+  local upload_date="$4"
+  local duration="$5"
+  local views="$6"
+  local likes="$7"
+  local comments="$8"
+  local shares="$9"
+  local url="${10}"
+  local sync_date
+  sync_date=$(date '+%Y-%m-%d %H:%M')
+
+  # Formata data de upload (YYYYMMDD → YYYY-MM-DD)
+  local formatted_date=""
+  if [[ -n "$upload_date" && ${#upload_date} -eq 8 ]]; then
+    formatted_date="${upload_date:0:4}-${upload_date:4:2}-${upload_date:6:2}"
+  else
+    formatted_date="$upload_date"
+  fi
+
+  # Monta JSON dos valores (escapando aspas no título e descrição)
+  local values
+  values=$(python3 -c "
+import json, sys
+row = [[
+    '$video_id',
+    $(python3 -c "import json; print(json.dumps('$title'))"),
+    $(python3 -c "import json; print(json.dumps('''$description'''))"),
+    '$CHANNEL',
+    '$formatted_date',
+    '$duration',
+    '$views',
+    '$likes',
+    '$comments',
+    '$shares',
+    '$url',
+    'downloaded',
+    '$sync_date',
+    ''
+]]
+print(json.dumps(row))
+")
+
+  sheets_append "${SHEET_VIDEOS}!A:N" "$values" >/dev/null 2>&1
+}
+
+parse_field() {
+  # Extrai campo do JSON de forma segura
+  local json="$1"
+  local field="$2"
+  local default="${3:-}"
+  echo "$json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+val = d.get('$field', '$default')
+print(val if val is not None else '$default')
+" 2>/dev/null || echo "$default"
+}
+
+# ============================================================
+# ETAPA 1: Listar vídeos do canal
+# ============================================================
+echo "==> [1/3] Carregando vídeos já sincronizados da planilha..."
+load_synced_ids
+
+echo "==> [2/3] Listando vídeos de ${CHANNEL}..."
+
+# Monta opções do yt-dlp
+# Nota: sem --flat-playlist para obter metadados completos (view_count, etc.)
+# yt-dlp já prefere formatos sem watermark automaticamente
+YTDLP_OPTS=(
+  --dump-json
+  --no-download
+)
+
+# Limite por quantidade
+if [[ -n "$LAST" ]]; then
+  YTDLP_OPTS+=(--playlist-end "$LAST")
+fi
+
+# Busca metadados
+ORDER_LABEL="mais novos primeiro"
+[[ "$ORDER" == "oldest" ]] && ORDER_LABEL="mais antigos primeiro"
+echo "    Buscando metadados ($ORDER_LABEL, pode demorar)..."
+
+METADATA_RAW=$(yt-dlp "${YTDLP_OPTS[@]}" "$TIKTOK_URL" 2>/dev/null) || {
+  echo "Erro: não foi possível listar vídeos de ${CHANNEL}" >&2
+  echo "Verifique se o canal existe e está público." >&2
+  exit 1
+}
+
+# Se ordem = oldest, inverte as linhas (TikTok retorna newest first)
+if [[ "$ORDER" == "oldest" ]]; then
+  METADATA_RAW=$(echo "$METADATA_RAW" | tac)
+fi
+
+TOTAL=0
+NOVOS=0
+PULADOS=0
+ERROS=0
+
+echo "==> [3/3] Processando vídeos..."
+
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+
+  video_id=$(parse_field "$line" "id")
+  title=$(parse_field "$line" "title" "sem título")
+  description=$(parse_field "$line" "description")
+  upload_date=$(parse_field "$line" "upload_date")
+  duration=$(parse_field "$line" "duration" "0")
+  view_count=$(parse_field "$line" "view_count" "0")
+  like_count=$(parse_field "$line" "like_count" "0")
+  comment_count=$(parse_field "$line" "comment_count" "0")
+  share_count=$(parse_field "$line" "repost_count" "0")
+  webpage_url=$(parse_field "$line" "webpage_url")
+
+  [[ -z "$video_id" ]] && continue
+  TOTAL=$((TOTAL + 1))
+
+  # Filtro por período (de/até)
+  if [[ -n "$upload_date" ]]; then
+    video_ts=$(date -d "${upload_date:0:4}-${upload_date:4:2}-${upload_date:6:2}" +%s 2>/dev/null || echo 0)
+    if [[ -n "$SINCE" ]]; then
+      since_ts=$(date -d "$SINCE" +%s 2>/dev/null || echo 0)
+      if [[ "$video_ts" -lt "$since_ts" ]]; then
+        continue
+      fi
+    fi
+    if [[ -n "$UNTIL" ]]; then
+      until_ts=$(date -d "$UNTIL" +%s 2>/dev/null || echo 0)
+      if [[ "$video_ts" -gt "$until_ts" ]]; then
+        continue
+      fi
+    fi
+  fi
+
+  # Já sincronizado?
+  if is_synced "$video_id"; then
+    PULADOS=$((PULADOS + 1))
+    echo "  [skip] ${video_id} — já sincronizado"
+    continue
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [new]  ${video_id} | ${duration}s | ${upload_date} | ${title}"
+    NOVOS=$((NOVOS + 1))
+    continue
+  fi
+
+  # ============================================================
+  # Download do vídeo
+  # ============================================================
+  JOB_DIR="${VIDEOS_DIR}/${video_id}"
+  mkdir -p "$JOB_DIR"
+
+  echo "  [download] ${video_id} — ${title}"
+
+  # Baixa vídeo (melhor qualidade, yt-dlp já prefere sem watermark)
+  if yt-dlp \
+    -o "${JOB_DIR}/video.%(ext)s" \
+    --write-info-json \
+    --no-playlist \
+    "$webpage_url" 2>"${JOB_DIR}/download.log"; then
+
+    # Renomeia info json para metadata.json
+    if ls "${JOB_DIR}"/*.info.json 1>/dev/null 2>&1; then
+      mv "${JOB_DIR}"/*.info.json "${JOB_DIR}/metadata.json"
+    fi
+
+    # Salva metadados resumidos localmente
+    echo "$line" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+summary = {
+    'id': d.get('id'),
+    'title': d.get('title'),
+    'description': d.get('description', ''),
+    'upload_date': d.get('upload_date'),
+    'duration': d.get('duration'),
+    'view_count': d.get('view_count'),
+    'like_count': d.get('like_count'),
+    'comment_count': d.get('comment_count'),
+    'repost_count': d.get('repost_count'),
+    'uploader': d.get('uploader'),
+    'webpage_url': d.get('webpage_url', d.get('url')),
+    'channel': '${CHANNEL}',
+    'status': 'downloaded'
+}
+with open('${JOB_DIR}/summary.json', 'w') as f:
+    json.dump(summary, f, indent=2, ensure_ascii=False)
+" 2>/dev/null
+
+    # Registra na planilha
+    register_in_sheet "$video_id" "$title" "$description" "$upload_date" \
+      "$duration" "$view_count" "$like_count" "$comment_count" "$share_count" "$webpage_url"
+
+    NOVOS=$((NOVOS + 1))
+    echo "    ✓ salvo em ${JOB_DIR}/ + registrado na planilha"
+  else
+    ERROS=$((ERROS + 1))
+    echo "    ✗ erro no download (ver ${JOB_DIR}/download.log)"
+  fi
+
+done <<< "$METADATA_RAW"
+
+# --- Resumo ---
+echo ""
+echo "=== Sync completo ==="
+echo "  Canal:       ${CHANNEL}"
+echo "  Total:       ${TOTAL} vídeos encontrados"
+echo "  Novos:       ${NOVOS} baixados"
+echo "  Já tinham:   ${PULADOS} pulados"
+if [[ "$ERROS" -gt 0 ]]; then
+  echo "  Erros:       ${ERROS}"
+fi
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "  (modo dry-run — nenhum vídeo foi baixado)"
+fi

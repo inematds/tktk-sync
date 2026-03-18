@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# tk-analyze — Analisa vídeo TikTok e gera descrições para YouTube/Instagram via LLM
+#
+# Uso:
+#   tk-analyze <video_id>       # Analisa um vídeo específico
+#   tk-analyze --all            # Analisa todos com status=downloaded
+#
+# Suporta: anthropic, piramyd, openrouter, ollama
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$HOME/.deno/bin:/usr/bin:$HOME/.npm-global/bin:$PATH"
+
+# --- Config ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${PROJECT_DIR}/config/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+source "${SCRIPT_DIR}/lib-sheets.sh"
+
+VIDEOS_DIR="${VIDEOS_DIR:-${PROJECT_DIR}/videos}"
+PROMPT_FILE="${PROJECT_DIR}/config/prompt_descricao.txt"
+SHEET_VIDEOS="VIDEOS"
+VIDEO_ID=""
+ALL_MODE=false
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all)    ALL_MODE=true; shift ;;
+    --help|-h)
+      echo "Uso: tk-analyze <video_id> | --all"
+      exit 0
+      ;;
+    -*)
+      echo "Erro: opção desconhecida: $1" >&2
+      exit 1
+      ;;
+    *)
+      VIDEO_ID="$1"; shift ;;
+  esac
+done
+
+# --- Carrega config da planilha ---
+load_ai_config() {
+  local config_raw
+  config_raw=$(sheets_get "CONFIG!A2:B30" 2>/dev/null)
+  AI_MODE=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('ai_mode', 'piramyd'))
+" 2>/dev/null || echo "piramyd")
+
+  AI_MODEL=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('ai_model', 'claude-sonnet-4-5-20250514'))
+" 2>/dev/null || echo "claude-sonnet-4-5-20250514")
+
+  # Carrega keys específicas da config
+  PIRAMYD_API_KEY_CFG=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('piramyd_api_key', ''))
+" 2>/dev/null || echo "")
+
+  ANTHROPIC_API_KEY_CFG=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('anthropic_api_key', ''))
+" 2>/dev/null || echo "")
+
+  OPENROUTER_API_KEY_CFG=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('openrouter_api_key', ''))
+" 2>/dev/null || echo "")
+
+  OLLAMA_BASE_URL=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('ollama_base_url', 'http://localhost:11434'))
+" 2>/dev/null || echo "http://localhost:11434")
+
+  OLLAMA_MODEL=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('ollama_model', 'llama3.2-vision'))
+" 2>/dev/null || echo "llama3.2-vision")
+
+  PIRAMYD_BASE_URL=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('piramyd_base_url', 'https://api.piramyd.cloud/v1'))
+" 2>/dev/null || echo "https://api.piramyd.cloud/v1")
+
+  # Config da planilha sobrescreve env vars (se não estiver vazia)
+  if [[ -n "$PIRAMYD_API_KEY_CFG" ]]; then PIRAMYD_API_KEY="$PIRAMYD_API_KEY_CFG"; fi
+  if [[ -n "$ANTHROPIC_API_KEY_CFG" ]]; then ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY_CFG"; fi
+  if [[ -n "$OPENROUTER_API_KEY_CFG" ]]; then OPENROUTER_API_KEY="$OPENROUTER_API_KEY_CFG"; fi
+}
+
+# --- Chamada LLM ---
+# Salva prompt em arquivo temporário e chama via Python (evita problemas de escape)
+call_llm() {
+  local prompt_file="$1"  # recebe path do arquivo com o prompt
+
+  case "$AI_MODE" in
+    anthropic)
+      # Anthropic API direta: api.anthropic.com/v1/messages
+      # Auth: x-api-key + anthropic-version header
+      local api_key="${ANTHROPIC_API_KEY:-}"
+      [[ -z "$api_key" ]] && { echo "Erro: ANTHROPIC_API_KEY não configurada" >&2; return 1; }
+      python3 << PYEOF
+import json, urllib.request, os
+
+with open('$prompt_file') as f:
+    prompt_text = f.read()
+
+payload = {
+    'model': '$AI_MODEL',
+    'max_tokens': 2048,
+    'messages': [{'role': 'user', 'content': prompt_text}]
+}
+
+body = json.dumps(payload).encode()
+req = urllib.request.Request('https://api.anthropic.com/v1/messages', data=body)
+req.add_header('Content-Type', 'application/json')
+req.add_header('x-api-key', '$api_key')
+req.add_header('anthropic-version', '2023-06-01')
+resp = json.loads(urllib.request.urlopen(req, timeout=120).read())
+print(resp['content'][0]['text'])
+PYEOF
+      ;;
+
+    piramyd)
+      # Piramyd API: api.piramyd.cloud/v1/chat/completions
+      # Auth: Bearer token (formato OpenAI-compatible)
+      local api_key="${PIRAMYD_API_KEY:-}"
+      [[ -z "$api_key" ]] && { echo "Erro: PIRAMYD_API_KEY não configurada" >&2; return 1; }
+      python3 << PYEOF
+import json, urllib.request
+
+with open('$prompt_file') as f:
+    prompt_text = f.read()
+
+payload = {
+    'model': '$AI_MODEL',
+    'max_tokens': 2048,
+    'messages': [{'role': 'user', 'content': prompt_text}]
+}
+
+body = json.dumps(payload).encode()
+req = urllib.request.Request('https://api.piramyd.cloud/v1/chat/completions', data=body)
+req.add_header('Content-Type', 'application/json')
+req.add_header('Authorization', 'Bearer $api_key')
+resp = json.loads(urllib.request.urlopen(req, timeout=120).read())
+print(resp['choices'][0]['message']['content'])
+PYEOF
+      ;;
+
+    openrouter)
+      # OpenRouter: openrouter.ai/api/v1/chat/completions
+      # Auth: Bearer token (formato OpenAI-compatible)
+      local api_key="${OPENROUTER_API_KEY:-}"
+      [[ -z "$api_key" ]] && { echo "Erro: OPENROUTER_API_KEY não configurada" >&2; return 1; }
+      python3 << PYEOF
+import json, urllib.request
+
+with open('$prompt_file') as f:
+    prompt_text = f.read()
+
+payload = {
+    'model': '$AI_MODEL',
+    'max_tokens': 2048,
+    'messages': [{'role': 'user', 'content': prompt_text}]
+}
+
+body = json.dumps(payload).encode()
+req = urllib.request.Request('https://openrouter.ai/api/v1/chat/completions', data=body)
+req.add_header('Content-Type', 'application/json')
+req.add_header('Authorization', 'Bearer $api_key')
+resp = json.loads(urllib.request.urlopen(req, timeout=120).read())
+print(resp['choices'][0]['message']['content'])
+PYEOF
+      ;;
+
+    ollama)
+      # Ollama local: localhost:11434/api/chat
+      # Auth: nenhuma (local)
+      python3 << PYEOF
+import json, urllib.request
+
+with open('$prompt_file') as f:
+    prompt_text = f.read()
+
+payload = {
+    'model': '$OLLAMA_MODEL',
+    'messages': [{'role': 'user', 'content': prompt_text}],
+    'stream': False
+}
+
+body = json.dumps(payload).encode()
+req = urllib.request.Request('${OLLAMA_BASE_URL}/api/chat', data=body)
+req.add_header('Content-Type', 'application/json')
+resp = json.loads(urllib.request.urlopen(req, timeout=300).read())
+print(resp['message']['content'])
+PYEOF
+      ;;
+
+    *)
+      echo "Erro: ai_mode desconhecido: $AI_MODE" >&2
+      return 1
+      ;;
+  esac
+}
+
+# --- Análise de um vídeo ---
+analyze_video() {
+  local vid="$1"
+  local job_dir="${VIDEOS_DIR}/${vid}"
+  local summary_file="${job_dir}/summary.json"
+
+  if [[ ! -f "$summary_file" ]]; then
+    echo "  [skip] ${vid} — summary.json não encontrado"
+    return 1
+  fi
+
+  echo "  [analyze] ${vid}..."
+
+  # Lê metadados
+  local title description duration view_count like_count
+  title=$(python3 -c "import json; d=json.load(open('$summary_file')); print(d.get('title',''))")
+  description=$(python3 -c "import json; d=json.load(open('$summary_file')); print(d.get('description',''))")
+  duration=$(python3 -c "import json; d=json.load(open('$summary_file')); print(d.get('duration',0))")
+  view_count=$(python3 -c "import json; d=json.load(open('$summary_file')); print(d.get('view_count',0))")
+  like_count=$(python3 -c "import json; d=json.load(open('$summary_file')); print(d.get('like_count',0))")
+
+  # Carrega prompt template
+  local prompt_template
+  if [[ -f "$PROMPT_FILE" ]]; then
+    prompt_template=$(cat "$PROMPT_FILE")
+  else
+    echo "  [erro] Arquivo de prompt não encontrado: $PROMPT_FILE" >&2
+    return 1
+  fi
+
+  # Substitui variáveis no prompt e salva em arquivo
+  local prompt_rendered="${job_dir}/prompt.txt"
+  python3 << PYEOF
+import json
+
+with open('$PROMPT_FILE') as f:
+    template = f.read()
+
+with open('$summary_file') as f:
+    meta = json.load(f)
+
+rendered = template \
+    .replace('{title}', str(meta.get('title', ''))) \
+    .replace('{description}', str(meta.get('description', ''))) \
+    .replace('{duration}', str(meta.get('duration', 0))) \
+    .replace('{view_count}', str(meta.get('view_count', 0))) \
+    .replace('{like_count}', str(meta.get('like_count', 0)))
+
+with open('$prompt_rendered', 'w') as f:
+    f.write(rendered)
+PYEOF
+
+  # Chama LLM (passa arquivo do prompt)
+  local response
+  response=$(call_llm "$prompt_rendered") || {
+    echo "    ✗ erro na chamada LLM"
+    return 1
+  }
+
+  # Extrai JSON da resposta (pode ter texto extra)
+  local json_result
+  json_result=$(echo "$response" | python3 -c "
+import json, sys, re
+text = sys.stdin.read()
+# Tenta extrair JSON de dentro do texto
+match = re.search(r'\{[\s\S]*\}', text)
+if match:
+    data = json.loads(match.group())
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+else:
+    print(text)
+    sys.exit(1)
+" 2>/dev/null) || {
+    echo "    ✗ resposta do LLM não contém JSON válido"
+    echo "$response" > "${job_dir}/analyze_raw.txt"
+    return 1
+  }
+
+  # Salva resultado
+  echo "$json_result" > "${job_dir}/description.json"
+
+  # Atualiza status na planilha para 'analyzed'
+  local data row_num
+  data=$(sheets_get "VIDEOS!A2:A1000" 2>/dev/null)
+  row_num=$(echo "$data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for i, row in enumerate(data.get('values', [])):
+    if row and row[0] == '$vid':
+        print(i + 2)
+        sys.exit(0)
+" 2>/dev/null)
+
+  if [[ -n "$row_num" ]]; then
+    sheets_update "VIDEOS!L${row_num}" '[["analyzed"]]' >/dev/null 2>&1
+  fi
+
+  echo "    ✓ description.json salvo + status=analyzed"
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+echo "==> Carregando configuração de IA..."
+load_ai_config
+echo "    Modo: ${AI_MODE} | Modelo: ${AI_MODEL}"
+
+if [[ "$ALL_MODE" == "true" ]]; then
+  echo "==> Analisando todos os vídeos com status=downloaded..."
+  # Lista vídeos downloaded da planilha
+  data=$(sheets_get "VIDEOS!A2:L1000" 2>/dev/null)
+  video_ids=$(echo "$data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for row in data.get('values', []):
+    if len(row) > 11 and row[11] == 'downloaded':
+        print(row[0])
+" 2>/dev/null)
+
+  count=0
+  while IFS= read -r vid; do
+    [[ -z "$vid" ]] && continue
+    analyze_video "$vid" && count=$((count + 1))
+  done <<< "$video_ids"
+
+  echo ""
+  echo "=== Análise completa: ${count} vídeos analisados ==="
+
+elif [[ -n "$VIDEO_ID" ]]; then
+  analyze_video "$VIDEO_ID"
+
+else
+  echo "Erro: forneça video_id ou --all" >&2
+  exit 1
+fi

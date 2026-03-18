@@ -1,0 +1,13 @@
+config/.env
+config/credentials.enc
+config/.encryption_key
+config/client_secret.json
+videos/
+dashboard/sync_status.json
+dashboard/analyze_status.json
+dashboard/publish_status.json
+dashboard/scheduler_status.json
+__pycache__/
+*.pyc
+/tmp/
+*.log

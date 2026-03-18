@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# tk-setup-sheet — Cria a planilha Google Sheets para o tktk
+# Cria as abas: VIDEOS, CONFIG, PUBLICADOS
+#
+# Uso: tk-setup-sheet
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "${SCRIPT_DIR}/lib-sheets.sh"
+
+echo "==> Criando planilha tktk..."
+
+TOKEN=$(sheets_get_token)
+
+# Cria a planilha
+RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "properties": {
+      "title": "tktk — TikTok Sync"
+    },
+    "sheets": [
+      {
+        "properties": {
+          "title": "VIDEOS",
+          "gridProperties": {"frozenRowCount": 1}
+        }
+      },
+      {
+        "properties": {
+          "title": "PUBLICADOS",
+          "gridProperties": {"frozenRowCount": 1}
+        }
+      },
+      {
+        "properties": {
+          "title": "CONFIG",
+          "gridProperties": {"frozenRowCount": 1}
+        }
+      }
+    ]
+  }' \
+  "https://sheets.googleapis.com/v4/spreadsheets")
+
+NEW_SPREADSHEET_ID=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['spreadsheetId'])" 2>/dev/null)
+
+if [[ -z "$NEW_SPREADSHEET_ID" ]]; then
+  echo "Erro ao criar planilha:" >&2
+  echo "$RESPONSE" >&2
+  exit 1
+fi
+
+echo "    Planilha criada: $NEW_SPREADSHEET_ID"
+
+# Atualiza .env com o ID da planilha
+if grep -q "^SPREADSHEET_ID=" "${PROJECT_DIR}/config/.env"; then
+  sed -i "s|^SPREADSHEET_ID=.*|SPREADSHEET_ID=${NEW_SPREADSHEET_ID}|" "${PROJECT_DIR}/config/.env"
+else
+  echo "SPREADSHEET_ID=${NEW_SPREADSHEET_ID}" >> "${PROJECT_DIR}/config/.env"
+fi
+echo "    .env atualizado"
+
+# Recarrega env
+export SPREADSHEET_ID="$NEW_SPREADSHEET_ID"
+
+# Adiciona cabeçalhos na aba VIDEOS
+echo "==> Adicionando cabeçalhos..."
+
+curl -s -X PUT \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "range": "VIDEOS!A1:N1",
+    "majorDimension": "ROWS",
+    "values": [["video_id","titulo","descricao","canal","data_upload","duracao","views","likes","comments","shares","url_tiktok","status","data_sync","observacoes"]]
+  }' \
+  "https://sheets.googleapis.com/v4/spreadsheets/${NEW_SPREADSHEET_ID}/values/VIDEOS!A1:N1?valueInputOption=RAW" >/dev/null
+
+# Cabeçalhos PUBLICADOS
+curl -s -X PUT \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "range": "PUBLICADOS!A1:L1",
+    "majorDimension": "ROWS",
+    "values": [["video_id","titulo_original","titulo_pub","descricao_pub","plataforma","url_publicado","data_publicacao","privacy","duracao","tags","categoria","observacoes"]]
+  }' \
+  "https://sheets.googleapis.com/v4/spreadsheets/${NEW_SPREADSHEET_ID}/values/PUBLICADOS!A1:L1?valueInputOption=RAW" >/dev/null
+
+# Config padrão
+curl -s -X PUT \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "range": "CONFIG!A1:B20",
+    "majorDimension": "ROWS",
+    "values": [
+      ["chave","valor"],
+      ["tiktok_channel","@inema.tia"],
+      ["sync_auto","false"],
+      ["sync_horarios","08:00,20:00"],
+      ["sync_max_por_vez","10"],
+      ["pub_auto","false"],
+      ["pub_horarios","10:00,16:00"],
+      ["pub_max_por_vez","3"],
+      ["privacy_padrao","unlisted"],
+      ["ai_mode","piramyd-api"],
+      ["ai_model","claude-sonnet-4-5-20250514"],
+      ["pipeline_sync_paused","true"],
+      ["pipeline_pub_paused","true"]
+    ]
+  }' \
+  "https://sheets.googleapis.com/v4/spreadsheets/${NEW_SPREADSHEET_ID}/values/CONFIG!A1:B20?valueInputOption=RAW" >/dev/null
+
+echo ""
+echo "=== Setup completo ==="
+echo "  Planilha: https://docs.google.com/spreadsheets/d/${NEW_SPREADSHEET_ID}"
+echo "  Abas: VIDEOS, PUBLICADOS, CONFIG"
+echo "  SPREADSHEET_ID salvo no .env"

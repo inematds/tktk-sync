@@ -1,0 +1,27 @@
+Você é um especialista em conteúdo para redes sociais.
+
+Analise o vídeo do TikTok abaixo e gere conteúdo otimizado para republicação.
+
+DADOS DO VÍDEO ORIGINAL:
+- Título: {title}
+- Descrição: {description}
+- Duração: {duration}s
+- Views: {view_count} | Likes: {like_count}
+
+GERE (em JSON):
+{
+  "titulo_youtube": "Título para YouTube Shorts (max 100 chars, atrativo, com emoji)",
+  "descricao_youtube": "Descrição para YouTube (2-3 parágrafos, com hashtags relevantes, CTA)",
+  "titulo_instagram": "Título/caption para Instagram Reels (max 2200 chars, com emojis e hashtags)",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+  "categoria": "número da categoria YouTube (22=People, 24=Entertainment, 27=Education, 28=Science)",
+  "resumo": "Resumo de 1 linha do conteúdo do vídeo"
+}
+
+REGRAS:
+- Títulos devem ser atrativos e gerar curiosidade
+- Descrições devem ser naturais, não parecer geradas por IA
+- Tags relevantes ao conteúdo
+- Manter o tom e estilo do vídeo original
+- Incluir hashtags populares relacionadas
+- Responda APENAS com o JSON, sem texto adicional

@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# tk-publish — Publica vídeo TikTok no YouTube Shorts (e futuramente Instagram Reels)
+# Usa description.json gerado pelo tk-analyze para título/descrição
+#
+# Uso:
+#   tk-publish <video_id>                    # Publica um vídeo específico
+#   tk-publish <video_id> --privacy unlisted # Define privacidade
+#   tk-publish --all                         # Publica todos os 'analyzed'
+#   tk-publish --all --platform youtube      # Só YouTube
+#
+# Requer: tk-analyze já ter rodado (description.json)
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$HOME/.deno/bin:/usr/bin:$HOME/.npm-global/bin:$PATH"
+
+# --- Config ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${PROJECT_DIR}/config/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+source "${SCRIPT_DIR}/lib-sheets.sh"
+
+VIDEOS_DIR="${VIDEOS_DIR:-${PROJECT_DIR}/videos}"
+CONFIG_DIR="${PROJECT_DIR}/config"
+SHEET_VIDEOS="VIDEOS"
+SHEET_PUB="PUBLICADOS"
+VIDEO_ID=""
+ALL_MODE=false
+PRIVACY=""
+PLATFORM="youtube"  # youtube | instagram | all
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all)        ALL_MODE=true; shift ;;
+    --privacy)    PRIVACY="$2"; shift 2 ;;
+    --platform)   PLATFORM="$2"; shift 2 ;;
+    --help|-h)
+      head -12 "$0" | tail -10
+      echo ""
+      echo "Opções:"
+      echo "  --privacy     public|unlisted|private (padrão: da config)"
+      echo "  --platform    youtube|instagram|all (padrão: youtube)"
+      echo "  --all         Publica todos com status=analyzed"
+      exit 0
+      ;;
+    -*)
+      echo "Erro: opção desconhecida: $1" >&2
+      exit 1
+      ;;
+    *)
+      VIDEO_ID="$1"; shift ;;
+  esac
+done
+
+# --- Carrega config ---
+load_pub_config() {
+  local config_raw
+  config_raw=$(sheets_get "CONFIG!A2:B30" 2>/dev/null)
+
+  if [[ -z "$PRIVACY" ]]; then
+    PRIVACY=$(echo "$config_raw" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+config = {r[0]: r[1] for r in data.get('values', []) if len(r) >= 2}
+print(config.get('privacy_padrao', 'unlisted'))
+" 2>/dev/null || echo "unlisted")
+  fi
+}
+
+# --- OAuth token ---
+get_access_token() {
+  python3 << PYEOF
+import json, base64, urllib.request, urllib.parse, os
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+config_dir = '${CONFIG_DIR}'
+with open(os.path.join(config_dir, '.encryption_key'), 'r') as f:
+    key = base64.b64decode(f.read().strip())
+with open(os.path.join(config_dir, 'credentials.enc'), 'rb') as f:
+    data = f.read()
+aesgcm = AESGCM(key)
+creds = json.loads(aesgcm.decrypt(data[:12], data[12:], None))
+
+token_data = urllib.parse.urlencode({
+    'client_id': os.environ['CLIENT_ID'],
+    'client_secret': os.environ['CLIENT_SECRET'],
+    'refresh_token': creds['refresh_token'],
+    'grant_type': 'refresh_token'
+}).encode()
+req = urllib.request.Request('https://oauth2.googleapis.com/token', data=token_data)
+resp = json.loads(urllib.request.urlopen(req).read())
+print(resp['access_token'])
+PYEOF
+}
+
+# --- Upload YouTube Shorts ---
+publish_youtube() {
+  local vid="$1"
+  local job_dir="${VIDEOS_DIR}/${vid}"
+  local desc_file="${job_dir}/description.json"
+  local video_file
+
+  # Encontra o arquivo de vídeo
+  video_file=$(ls "${job_dir}"/video.* 2>/dev/null | head -1)
+  if [[ -z "$video_file" || ! -f "$video_file" ]]; then
+    echo "    ✗ arquivo de vídeo não encontrado em ${job_dir}/"
+    return 1
+  fi
+
+  if [[ ! -f "$desc_file" ]]; then
+    echo "    ✗ description.json não encontrado (rode tk-analyze antes)"
+    return 1
+  fi
+
+  # Lê dados do description.json
+  local yt_title yt_desc yt_tags yt_category
+  yt_title=$(python3 -c "import json; d=json.load(open('$desc_file')); print(d.get('titulo_youtube',''))")
+  yt_desc=$(python3 -c "import json; d=json.load(open('$desc_file')); print(d.get('descricao_youtube',''))")
+  yt_tags=$(python3 -c "import json; d=json.load(open('$desc_file')); print(json.dumps(d.get('tags',[])))")
+  yt_category=$(python3 -c "import json; d=json.load(open('$desc_file')); print(d.get('categoria','22'))")
+
+  # Adiciona #Shorts ao título se não tiver
+  if [[ "$yt_title" != *"#Shorts"* && "$yt_title" != *"#shorts"* ]]; then
+    yt_desc="${yt_desc}
+
+#Shorts"
+  fi
+
+  local file_size
+  file_size=$(stat -c%s "$video_file")
+
+  echo "    YouTube: \"${yt_title}\" (${file_size} bytes, ${PRIVACY})"
+
+  # Token
+  local token
+  token=$(get_access_token) || {
+    echo "    ✗ erro ao obter token OAuth"
+    return 1
+  }
+
+  # Monta metadata
+  local metadata
+  metadata=$(python3 << PYEOF
+import json
+
+desc_data = json.load(open('$desc_file'))
+title = desc_data.get('titulo_youtube', '')
+description = desc_data.get('descricao_youtube', '')
+tags = desc_data.get('tags', [])
+category = str(desc_data.get('categoria', '22'))
+
+# Garante #Shorts na descrição
+if '#Shorts' not in description and '#shorts' not in description:
+    description += '\n\n#Shorts'
+
+meta = {
+    'snippet': {
+        'title': title[:100],
+        'description': description,
+        'tags': tags,
+        'categoryId': category,
+        'defaultLanguage': 'pt',
+        'defaultAudioLanguage': 'pt'
+    },
+    'status': {
+        'privacyStatus': '$PRIVACY',
+        'selfDeclaredMadeForKids': False
+    }
+}
+print(json.dumps(meta))
+PYEOF
+)
+
+  # Upload resumable — Step 1: Initiate
+  local upload_url
+  upload_url=$(curl -s -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json; charset=UTF-8" \
+    -H "X-Upload-Content-Length: ${file_size}" \
+    -H "X-Upload-Content-Type: video/*" \
+    -D - \
+    -d "$metadata" \
+    "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status&key=${API_KEY}" \
+    2>/dev/null | grep -i "^location:" | tr -d '\r' | sed 's/location: //i')
+
+  if [[ -z "$upload_url" ]]; then
+    echo "    ✗ falha ao iniciar upload resumable"
+    return 1
+  fi
+
+  # Step 2: Upload file
+  echo "    Enviando..."
+  local response
+  response=$(curl -s -X PUT \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: video/*" \
+    -H "Content-Length: ${file_size}" \
+    --connect-timeout 30 \
+    --max-time 600 \
+    --data-binary "@${video_file}" \
+    "$upload_url")
+
+  # Parse response
+  local yt_video_id
+  yt_video_id=$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+
+  if [[ -n "$yt_video_id" ]]; then
+    echo "    ✓ https://www.youtube.com/shorts/${yt_video_id}"
+
+    # Registra na aba PUBLICADOS
+    local pub_date
+    pub_date=$(date '+%Y-%m-%d %H:%M')
+    local orig_title
+    orig_title=$(python3 -c "import json; d=json.load(open('${job_dir}/summary.json')); print(d.get('title',''))" 2>/dev/null || echo "")
+
+    local pub_values
+    pub_values=$(python3 -c "
+import json
+row = [[
+    '$vid',
+    $(python3 -c "import json; print(json.dumps('''$orig_title'''))"),
+    $(python3 -c "import json; print(json.dumps('''$yt_title'''))"),
+    '',
+    'youtube',
+    'https://www.youtube.com/shorts/$yt_video_id',
+    '$pub_date',
+    '$PRIVACY',
+    '',
+    $(python3 -c "import json; d=json.load(open('$desc_file')); print(json.dumps(','.join(d.get('tags',[]))))"),
+    '$yt_category',
+    ''
+]]
+print(json.dumps(row))
+")
+    sheets_append "${SHEET_PUB}!A:L" "$pub_values" >/dev/null 2>&1
+
+    # Atualiza status na aba VIDEOS
+    local data row_num
+    data=$(sheets_get "VIDEOS!A2:A1000" 2>/dev/null)
+    row_num=$(echo "$data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for i, row in enumerate(data.get('values', [])):
+    if row and row[0] == '$vid':
+        print(i + 2)
+        sys.exit(0)
+" 2>/dev/null)
+    if [[ -n "$row_num" ]]; then
+      sheets_update "VIDEOS!L${row_num}" '[["published"]]' >/dev/null 2>&1
+    fi
+
+    return 0
+  else
+    echo "    ✗ erro no upload:"
+    echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+    return 1
+  fi
+}
+
+# --- Publish one video ---
+publish_video() {
+  local vid="$1"
+  echo "  [publish] ${vid}"
+
+  case "$PLATFORM" in
+    youtube)
+      publish_youtube "$vid"
+      ;;
+    instagram)
+      echo "    Instagram Reels: ainda não implementado (próxima fase)"
+      ;;
+    all)
+      publish_youtube "$vid"
+      # publish_instagram "$vid"  # futuro
+      ;;
+  esac
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+echo "==> Carregando configuração..."
+load_pub_config
+echo "    Privacidade: ${PRIVACY} | Plataforma: ${PLATFORM}"
+
+if [[ "$ALL_MODE" == "true" ]]; then
+  echo "==> Publicando todos os vídeos com status=analyzed..."
+  data=$(sheets_get "VIDEOS!A2:L1000" 2>/dev/null)
+  video_ids=$(echo "$data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for row in data.get('values', []):
+    if len(row) > 11 and row[11] == 'analyzed':
+        print(row[0])
+" 2>/dev/null)
+
+  count=0
+  errors=0
+  while IFS= read -r vid; do
+    [[ -z "$vid" ]] && continue
+    if publish_video "$vid"; then
+      count=$((count + 1))
+    else
+      errors=$((errors + 1))
+    fi
+  done <<< "$video_ids"
+
+  echo ""
+  echo "=== Publicação completa: ${count} publicados, ${errors} erros ==="
+
+elif [[ -n "$VIDEO_ID" ]]; then
+  publish_video "$VIDEO_ID"
+
+else
+  echo "Erro: forneça video_id ou --all" >&2
+  exit 1
+fi
