@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# tk-download — Worker de download: baixa vídeos pendentes da planilha
+# Pega vídeos com status=pending, baixa e muda para downloaded
+#
+# Uso:
+#   tk-download                # Baixa todos os pendentes
+#   tk-download --max 10       # Baixa no máximo 10
+#   tk-download --once         # Roda uma vez e sai (para cron/scheduler)
+#   tk-download --loop 60      # Roda em loop a cada 60 segundos
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$HOME/.deno/bin:/usr/bin:$HOME/.npm-global/bin:$PATH"
+
+# --- Config ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${PROJECT_DIR}/config/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+source "${SCRIPT_DIR}/lib-sheets.sh"
+
+VIDEOS_DIR="${VIDEOS_DIR:-${PROJECT_DIR}/videos}"
+SHEET_VIDEOS="VIDEOS"
+MAX_DOWNLOADS=""
+LOOP_INTERVAL=""
+ONCE=false
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max)    MAX_DOWNLOADS="$2"; shift 2 ;;
+    --once)   ONCE=true; shift ;;
+    --loop)   LOOP_INTERVAL="$2"; shift 2 ;;
+    --help|-h)
+      head -10 "$0" | tail -8
+      exit 0
+      ;;
+    *) shift ;;
+  esac
+done
+
+mkdir -p "$VIDEOS_DIR"
+
+# --- Download de um vídeo ---
+download_video() {
+  local video_id="$1"
+  local url="$2"
+  local row_num="$3"
+  local job_dir="${VIDEOS_DIR}/${video_id}"
+  mkdir -p "$job_dir"
+
+  echo "  [download] ${video_id}"
+
+  # Baixa vídeo (melhor qualidade, yt-dlp já prefere sem watermark)
+  if yt-dlp \
+    -o "${job_dir}/video.%(ext)s" \
+    --write-info-json \
+    --no-playlist \
+    "$url" 2>"${job_dir}/download.log"; then
+
+    # Renomeia info json para metadata.json
+    if ls "${job_dir}"/*.info.json 1>/dev/null 2>&1; then
+      mv "${job_dir}"/*.info.json "${job_dir}/metadata.json"
+    fi
+
+    # Gera summary.json a partir do metadata
+    if [[ -f "${job_dir}/metadata.json" ]]; then
+      python3 -c "
+import json
+with open('${job_dir}/metadata.json') as f:
+    d = json.load(f)
+summary = {
+    'id': d.get('id'),
+    'title': d.get('title'),
+    'description': d.get('description', ''),
+    'upload_date': d.get('upload_date'),
+    'duration': d.get('duration'),
+    'view_count': d.get('view_count'),
+    'like_count': d.get('like_count'),
+    'comment_count': d.get('comment_count'),
+    'repost_count': d.get('repost_count'),
+    'uploader': d.get('uploader'),
+    'webpage_url': d.get('webpage_url', d.get('url')),
+    'channel': d.get('uploader', ''),
+    'status': 'downloaded'
+}
+with open('${job_dir}/summary.json', 'w') as f:
+    json.dump(summary, f, indent=2, ensure_ascii=False)
+" 2>/dev/null
+    fi
+
+    # Atualiza planilha: status=downloaded + metadados
+    if [[ -f "${job_dir}/metadata.json" ]]; then
+      python3 -c "
+import json, subprocess, os
+
+with open('${job_dir}/metadata.json') as f:
+    d = json.load(f)
+
+upload_date = d.get('upload_date', '')
+if upload_date and len(upload_date) == 8:
+    upload_date = f'{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}'
+
+# Update columns: descricao(C), data_upload(E), duracao(F), views(G), likes(H), comments(I), shares(J), status(L)
+" 2>/dev/null
+    fi
+
+    # Atualiza status e metadados na planilha
+    local upload_date duration views likes comments shares
+    if [[ -f "${job_dir}/summary.json" ]]; then
+      upload_date=$(python3 -c "import json; d=json.load(open('${job_dir}/summary.json')); ud=d.get('upload_date',''); print(f'{ud[:4]}-{ud[4:6]}-{ud[6:8]}' if ud and len(ud)==8 else ud)" 2>/dev/null)
+      duration=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('duration',0))" 2>/dev/null)
+      views=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('view_count',0))" 2>/dev/null)
+      likes=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('like_count',0))" 2>/dev/null)
+      comments=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('comment_count',0))" 2>/dev/null)
+      shares=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('repost_count',0))" 2>/dev/null)
+      description=$(python3 -c "import json; print(json.load(open('${job_dir}/summary.json')).get('description',''))" 2>/dev/null)
+    fi
+
+    # Update row: C=descricao, E=data, F=duracao, G=views, H=likes, I=comments, J=shares, L=status
+    sheets_update "VIDEOS!E${row_num}:J${row_num}" "[[\"${upload_date:-}\",\"${duration:-0}\",\"${views:-0}\",\"${likes:-0}\",\"${comments:-0}\",\"${shares:-0}\"]]" >/dev/null 2>&1
+    sheets_update "VIDEOS!L${row_num}" '[[\"downloaded\"]]' >/dev/null 2>&1
+
+    echo "    ✓ downloaded"
+    return 0
+  else
+    echo "    ✗ erro (ver ${job_dir}/download.log)"
+    sheets_update "VIDEOS!L${row_num}" '[["error"]]' >/dev/null 2>&1
+    return 1
+  fi
+}
+
+# --- Busca pendentes da planilha ---
+process_pending() {
+  echo "==> Buscando vídeos pendentes..."
+  local data
+  data=$(sheets_get "VIDEOS!A2:L2000" 2>/dev/null)
+
+  local pending
+  pending=$(echo "$data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+rows = data.get('values', [])
+for i, row in enumerate(rows):
+    if len(row) > 11 and row[11] == 'pending':
+        vid = row[0]
+        url = row[10] if len(row) > 10 else ''
+        row_num = i + 2
+        print(f'{vid}|{url}|{row_num}')
+" 2>/dev/null)
+
+  if [[ -z "$pending" ]]; then
+    echo "    Nenhum vídeo pendente"
+    return 0
+  fi
+
+  local count=0
+  local errors=0
+  local total
+  total=$(echo "$pending" | wc -l)
+  echo "    ${total} vídeos pendentes"
+
+  while IFS='|' read -r video_id url row_num; do
+    [[ -z "$video_id" ]] && continue
+
+    if [[ -n "$MAX_DOWNLOADS" && "$count" -ge "$MAX_DOWNLOADS" ]]; then
+      echo "    Max downloads atingido (${MAX_DOWNLOADS})"
+      break
+    fi
+
+    if download_video "$video_id" "$url" "$row_num"; then
+      count=$((count + 1))
+    else
+      errors=$((errors + 1))
+    fi
+  done <<< "$pending"
+
+  echo ""
+  echo "=== Download: ${count} OK, ${errors} erros, $((total - count - errors)) restantes ==="
+}
+
+# --- Main ---
+if [[ -n "$LOOP_INTERVAL" ]]; then
+  echo "tk-download worker (loop a cada ${LOOP_INTERVAL}s)"
+  while true; do
+    process_pending
+    echo "--- Próximo check em ${LOOP_INTERVAL}s ---"
+    sleep "$LOOP_INTERVAL"
+  done
+else
+  process_pending
+fi

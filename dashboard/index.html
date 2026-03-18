@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>tktk — TikTok Sync Dashboard</title>
+<title>tktk-Sync — Dashboard</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; }
@@ -108,6 +108,22 @@
   /* Sync log */
   .sync-log { background: #0a0a0a; border-radius: 4px; padding: 12px; font-family: 'Fira Code', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; color: #aaa; margin-top: 12px; }
 
+  /* Modal */
+  .modal-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:100; justify-content:center; align-items:center; }
+  .modal-overlay.show { display:flex; }
+  .modal { background:#1a1a2e; border-radius:12px; padding:24px; max-width:700px; width:90%; max-height:85vh; overflow-y:auto; }
+  .modal h3 { color:#fe2c55; margin-bottom:16px; }
+  .modal-field { margin-bottom:14px; }
+  .modal-field label { display:block; font-size:12px; color:#888; margin-bottom:4px; text-transform:uppercase; letter-spacing:0.5px; }
+  .modal-field .value { background:#0f0f0f; border:1px solid #333; border-radius:4px; padding:10px 12px; color:#e0e0e0; font-size:13px; line-height:1.5; white-space:pre-wrap; }
+  .modal-field .tags { display:flex; gap:6px; flex-wrap:wrap; }
+  .modal-field .tag { background:#2d3748; color:#63b3ed; padding:3px 10px; border-radius:12px; font-size:12px; }
+  .modal-actions { display:flex; gap:8px; margin-top:20px; padding-top:16px; border-top:1px solid #333; }
+
+  /* Footer */
+  .footer { padding: 12px 24px; text-align: center; color: #444; font-size: 11px; border-top: 1px solid #1a1a2e; margin-top: 20px; }
+  .footer span { margin: 0 8px; }
+
   .hidden { display: none; }
   .saved-msg { color: #68d391; font-size: 12px; opacity: 0; transition: opacity 0.3s; }
   .saved-msg.show { opacity: 1; }
@@ -123,7 +139,7 @@
 <body>
 
 <div class="header">
-  <h1 onclick="showPage('main')"><span>tktk</span> Dashboard</h1>
+  <h1 onclick="showPage('main')"><span>tktk-Sync</span> Dashboard</h1>
   <div class="actions">
     <button class="btn btn-secondary btn-sm" onclick="loadAll()">Atualizar</button>
     <button class="btn btn-icon btn-sm" onclick="showPage('config')" title="Configurações">&#9881;</button>
@@ -168,9 +184,59 @@
 
   <!-- Tab: Publicados -->
   <div class="content tab-content hidden" id="tab-publicados">
-    <p style="color:#888">Publicações aparecerão aqui após o upload para YouTube/Instagram.</p>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Título Original</th>
+            <th>Título Publicado</th>
+            <th>Plataforma</th>
+            <th>Data</th>
+            <th>Privacy</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody id="pub-table"></tbody>
+      </table>
+    </div>
   </div>
 
+</div>
+
+<!-- Modal de Review -->
+<div class="modal-overlay" id="modal-review">
+  <div class="modal">
+    <h3 id="modal-review-title">Resultado da Análise</h3>
+    <div class="modal-field">
+      <label>Título YouTube</label>
+      <div class="value" id="mr-yt-title"></div>
+    </div>
+    <div class="modal-field">
+      <label>Descrição YouTube</label>
+      <div class="value" id="mr-yt-desc"></div>
+    </div>
+    <div class="modal-field">
+      <label>Caption Instagram</label>
+      <div class="value" id="mr-ig-caption"></div>
+    </div>
+    <div class="modal-field">
+      <label>Tags</label>
+      <div class="tags" id="mr-tags"></div>
+    </div>
+    <div class="modal-field">
+      <label>Categoria YouTube</label>
+      <div class="value" id="mr-category"></div>
+    </div>
+    <div class="modal-field">
+      <label>Resumo</label>
+      <div class="value" id="mr-resumo"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="mr-publish-btn" onclick="publishFromModal()">Publicar no YouTube</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Fechar</button>
+    </div>
+  </div>
 </div>
 
 <!-- ==================== CONFIG PAGE ==================== -->
@@ -541,6 +607,8 @@ async function loadStatus() {
     <div class="stat-card"><div class="number">${s.published}</div><div class="label">Publicados</div></div>
     <div class="stat-card"><div class="number">${s.pending}</div><div class="label">Pendentes</div></div>
   `;
+  const footer = document.getElementById('footer-stats');
+  if (footer) footer.textContent = `${s.total_videos} vídeos | ${s.downloaded} baixados | ${s.analyzed} analisados | ${s.published} publicados`;
 }
 
 async function loadVideos() {
@@ -563,30 +631,108 @@ async function loadVideos() {
       <td style="font-size:11px">${v.data_sync || ''}</td>
       <td>
         <a href="${v.url_tiktok || '#'}" target="_blank" class="btn btn-secondary btn-sm">TikTok</a>
+        ${v.status === 'pending' ? `<span class="badge" style="background:#1a1a2e;color:#555">Aguardando download</span>` : ''}
         ${v.status === 'downloaded' ? `<button class="btn btn-primary btn-sm" style="margin-left:4px" onclick="analyzeVideo('${v.video_id}')">Analisar</button>` : ''}
-        ${v.status === 'analyzed' ? `<button class="btn btn-sm" style="margin-left:4px;background:#22543d;color:#68d391" onclick="publishVideo('${v.video_id}')">Publicar</button>` : ''}
+        ${v.status === 'analyzed' ? `<button class="btn btn-sm" style="margin-left:4px;background:#2d3748;color:#fbd38d" onclick="openReviewModal('${v.video_id}')">Ver / Publicar</button>` : ''}
         ${v.status === 'published' ? `<span class="badge badge-published" style="margin-left:4px">Publicado</span>` : ''}
+        <button class="btn btn-sm" style="margin-left:4px;background:none;color:#666;border:1px solid #333;font-size:11px" onclick="deleteVideo('${v.video_id}')" title="Deletar">✕</button>
       </td>
     </tr>
   `).join('');
 }
 
+let currentModalVideoId = '';
+
 async function analyzeVideo(videoId) {
   const btn = event.target;
   btn.disabled = true;
-  btn.textContent = '...';
+  btn.textContent = 'Analisando...';
   const res = await api('/api/analyze', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({video_id: videoId})
   });
   if (res.ok) {
-    btn.textContent = 'OK';
-    setTimeout(() => loadAll(), 2000);
+    btn.textContent = 'Aguardando...';
+    // Poll até terminar
+    const poll = setInterval(async () => {
+      const detail = await api(`/api/video?id=${videoId}`);
+      if (detail.description) {
+        clearInterval(poll);
+        btn.textContent = 'Ver resultado';
+        btn.disabled = false;
+        btn.onclick = () => openReviewModal(videoId);
+        openReviewModal(videoId);
+        loadAll();
+      }
+    }, 3000);
   } else {
     btn.textContent = 'Erro';
     btn.style.background = '#742a2a';
     alert(res.error || 'Erro na análise');
+  }
+}
+
+async function openReviewModal(videoId) {
+  currentModalVideoId = videoId;
+  const data = await api(`/api/video?id=${videoId}`);
+
+  if (!data.description) {
+    alert('Vídeo ainda não foi analisado');
+    return;
+  }
+
+  const d = data.description;
+  const s = data.summary || {};
+
+  document.getElementById('modal-review-title').textContent = `Análise: ${(s.title || videoId).substring(0, 50)}`;
+  document.getElementById('mr-yt-title').textContent = d.titulo_youtube || '';
+  document.getElementById('mr-yt-desc').textContent = d.descricao_youtube || '';
+  document.getElementById('mr-ig-caption').textContent = d.titulo_instagram || '';
+  document.getElementById('mr-tags').innerHTML = (d.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
+  document.getElementById('mr-category').textContent = d.categoria || '';
+  document.getElementById('mr-resumo').textContent = d.resumo || '';
+
+  document.getElementById('modal-review').classList.add('show');
+}
+
+function closeModal() {
+  document.getElementById('modal-review').classList.remove('show');
+  currentModalVideoId = '';
+}
+
+async function publishFromModal() {
+  if (!currentModalVideoId) return;
+  const btn = document.getElementById('mr-publish-btn');
+  btn.disabled = true;
+  btn.textContent = 'Publicando...';
+
+  const res = await api('/api/publish', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: currentModalVideoId, platform: 'youtube'})
+  });
+
+  if (res.ok) {
+    btn.textContent = 'Enviado! Aguarde...';
+    // Poll publish status
+    const poll = setInterval(async () => {
+      try {
+        const resp = await fetch('/api/video?id=' + currentModalVideoId);
+        // Just wait a bit and refresh
+      } catch(e) {}
+    }, 3000);
+
+    setTimeout(() => {
+      clearInterval(poll);
+      btn.textContent = 'Publicado';
+      btn.style.background = '#22543d';
+      loadAll();
+    }, 15000);
+  } else {
+    btn.textContent = 'Erro';
+    btn.style.background = '#742a2a';
+    alert(res.error || 'Erro na publicação');
   }
 }
 
@@ -721,6 +867,35 @@ async function startSync() {
   }, 3000);
 }
 
+async function deleteVideo(videoId) {
+  if (!confirm(`Deletar vídeo ${videoId.slice(-8)} da lista e do disco?`)) return;
+  await api('/api/video/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: videoId})
+  });
+  loadAll();
+}
+
+async function changePrivacy(videoId, ytVideoId, privacy) {
+  const res = await api('/api/privacy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: videoId, yt_video_id: ytVideoId, privacy})
+  });
+  if (res.error) alert('Erro: ' + res.error);
+}
+
+async function deletePublication(videoId, ytVideoId) {
+  if (!confirm(`Deletar publicação ${videoId.slice(-8)} do YouTube e voltar para analyzed?`)) return;
+  await api('/api/publication/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_id: videoId, yt_video_id: ytVideoId})
+  });
+  loadAll();
+}
+
 function formatNumber(n) {
   if (!n || n === '0') return '-';
   n = parseInt(n);
@@ -755,10 +930,42 @@ async function loadFlowBar() {
   } catch(e) {}
 }
 
+async function loadPublicados() {
+  const pubs = await api('/api/publicados');
+  const tbody = document.getElementById('pub-table');
+  if (!pubs.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#555;padding:40px;">Nenhuma publicação ainda.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = pubs.filter(p => p.video_id).map(p => {
+    const ytId = (p.url_publicado || '').split('/').pop();
+    return `
+    <tr>
+      <td><code style="font-size:11px">${(p.video_id || '').slice(-8)}</code></td>
+      <td title="${p.titulo_original || ''}">${(p.titulo_original || '').slice(0, 35)}${(p.titulo_original||'').length > 35 ? '...' : ''}</td>
+      <td title="${p.titulo_pub || ''}">${(p.titulo_pub || '').slice(0, 40)}${(p.titulo_pub||'').length > 40 ? '...' : ''}</td>
+      <td><span class="badge badge-${p.plataforma === 'youtube' ? 'analyzed' : 'downloaded'}">${p.plataforma || ''}</span></td>
+      <td style="font-size:12px">${p.data_publicacao || ''}</td>
+      <td>
+        <select style="background:#0f0f0f;border:1px solid #333;border-radius:4px;padding:2px 6px;color:#e0e0e0;font-size:12px" onchange="changePrivacy('${p.video_id}','${ytId}',this.value)">
+          <option value="unlisted" ${p.privacy==='unlisted'?'selected':''}>unlisted</option>
+          <option value="public" ${p.privacy==='public'?'selected':''}>public</option>
+          <option value="private" ${p.privacy==='private'?'selected':''}>private</option>
+        </select>
+      </td>
+      <td>
+        ${p.url_publicado ? `<a href="${p.url_publicado}" target="_blank" class="btn btn-secondary btn-sm">Abrir</a>` : ''}
+        <button class="btn btn-sm" style="margin-left:4px;background:none;color:#666;border:1px solid #333;font-size:11px" onclick="deletePublication('${p.video_id}','${ytId}')" title="Deletar do YouTube">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
 async function loadAll() {
   try { await loadStatus(); } catch(e) { console.error('status:', e); }
   try { await loadFlowBar(); } catch(e) { console.error('flow:', e); }
   try { await loadVideos(); } catch(e) { console.error('videos:', e); }
+  try { await loadPublicados(); } catch(e) { console.error('pub:', e); }
 }
 
 // --- Hour Picker ---
@@ -839,5 +1046,8 @@ function saveHourConfig(name) {
 loadAll();
 setInterval(loadStatus, 30000);
 </script>
+<div class="footer">
+  tktk-Sync v1.1.0 <span>|</span> TikTok → YouTube Shorts <span>|</span> <span id="footer-stats"></span>
+</div>
 </body>
 </html>

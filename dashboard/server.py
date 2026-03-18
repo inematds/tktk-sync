@@ -131,6 +131,7 @@ def api_status():
 
     # Stats
     total = len(videos_rows)
+    pending_dl = sum(1 for r in videos_rows if len(r) > 11 and r[11] == 'pending')
     downloaded = sum(1 for r in videos_rows if len(r) > 11 and r[11] == 'downloaded')
     analyzed = sum(1 for r in videos_rows if len(r) > 11 and r[11] == 'analyzed')
     published = sum(1 for r in videos_rows if len(r) > 11 and r[11] == 'published')
@@ -138,6 +139,7 @@ def api_status():
 
     return {
         'total_videos': total,
+        'pending_download': pending_dl,
         'downloaded': downloaded,
         'analyzed': analyzed,
         'published': published,
@@ -261,6 +263,150 @@ def api_update_video_status(body):
     return {'error': 'video not found'}
 
 
+def api_delete_video(body):
+    """Deleta vídeo da planilha e do disco."""
+    video_id = body.get('video_id')
+    if not video_id:
+        return {'error': 'video_id required'}
+
+    # Remove do disco
+    import shutil
+    job_dir = os.path.join(VIDEOS_DIR, video_id)
+    if os.path.exists(job_dir):
+        shutil.rmtree(job_dir)
+
+    # Remove da planilha VIDEOS (marca como deleted, depois limpa)
+    data = sheets_get('VIDEOS!A2:N2000')
+    rows = data.get('values', [])
+    for i, row in enumerate(rows):
+        if row and row[0] == video_id:
+            # Limpa a linha inteira
+            empty = [[''] * 14]
+            sheets_update(f'VIDEOS!A{i+2}:N{i+2}', empty)
+            break
+
+    return {'ok': True, 'deleted': video_id}
+
+
+def api_change_privacy(body):
+    """Muda privacy de um vídeo publicado no YouTube."""
+    video_id = body.get('video_id')
+    privacy = body.get('privacy')
+    yt_video_id = body.get('yt_video_id', '')
+    if not video_id or not privacy:
+        return {'error': 'video_id and privacy required'}
+
+    # Atualiza no YouTube via API
+    if yt_video_id:
+        try:
+            token = get_access_token()
+            update_body = json.dumps({
+                'id': yt_video_id,
+                'status': {'privacyStatus': privacy}
+            }).encode()
+            req = urllib.request.Request(
+                f'https://www.googleapis.com/youtube/v3/videos?part=status&key={os.environ.get("API_KEY", "")}',
+                data=update_body, method='PUT')
+            req.add_header('Authorization', f'Bearer {token}')
+            req.add_header('Content-Type', 'application/json')
+            urllib.request.urlopen(req)
+        except Exception as e:
+            return {'error': f'YouTube API: {str(e)}'}
+
+    # Atualiza na planilha PUBLICADOS
+    data = sheets_get('PUBLICADOS!A2:L1000')
+    rows = data.get('values', [])
+    for i, row in enumerate(rows):
+        if row and row[0] == video_id:
+            sheets_update(f'PUBLICADOS!H{i+2}', [[privacy]])
+            break
+
+    return {'ok': True, 'video_id': video_id, 'privacy': privacy}
+
+
+def api_delete_publication(body):
+    """Deleta publicação do YouTube e remove da planilha."""
+    video_id = body.get('video_id')
+    yt_video_id = body.get('yt_video_id', '')
+    if not video_id:
+        return {'error': 'video_id required'}
+
+    # Deleta do YouTube
+    if yt_video_id:
+        try:
+            token = get_access_token()
+            req = urllib.request.Request(
+                f'https://www.googleapis.com/youtube/v3/videos?id={yt_video_id}&key={os.environ.get("API_KEY", "")}',
+                method='DELETE')
+            req.add_header('Authorization', f'Bearer {token}')
+            urllib.request.urlopen(req)
+        except Exception as e:
+            return {'error': f'YouTube API: {str(e)}'}
+
+    # Remove da planilha PUBLICADOS
+    data = sheets_get('PUBLICADOS!A2:L1000')
+    rows = data.get('values', [])
+    for i, row in enumerate(rows):
+        if row and row[0] == video_id:
+            empty = [[''] * 12]
+            sheets_update(f'PUBLICADOS!A{i+2}:L{i+2}', empty)
+            break
+
+    # Volta status do vídeo para analyzed
+    data = sheets_get('VIDEOS!A2:N2000')
+    rows = data.get('values', [])
+    for i, row in enumerate(rows):
+        if row and row[0] == video_id:
+            sheets_update(f'VIDEOS!L{i+2}', [['analyzed']])
+            break
+
+    return {'ok': True, 'deleted': video_id}
+
+
+def api_publicados():
+    """Lista publicações da aba PUBLICADOS."""
+    data = sheets_get('PUBLICADOS!A1:L1000')
+    rows = data.get('values', [])
+    if not rows:
+        return []
+    headers = rows[0]
+    pubs = []
+    for row in rows[1:]:
+        pub = {}
+        for i, h in enumerate(headers):
+            pub[h] = row[i] if i < len(row) else ''
+        pubs.append(pub)
+    return pubs
+
+
+# --- Video detail ---
+
+def api_video_detail():
+    """Retorna description.json de um vídeo."""
+    return None  # handled by GET with query param
+
+
+def api_video_detail_get(video_id):
+    """Retorna description.json + summary.json de um vídeo."""
+    job_dir = os.path.join(VIDEOS_DIR, video_id)
+    result = {}
+
+    summary_file = os.path.join(job_dir, 'summary.json')
+    if os.path.exists(summary_file):
+        with open(summary_file) as f:
+            result['summary'] = json.load(f)
+
+    desc_file = os.path.join(job_dir, 'description.json')
+    if os.path.exists(desc_file):
+        with open(desc_file) as f:
+            result['description'] = json.load(f)
+
+    if not result:
+        return {'error': 'video not found'}
+
+    return result
+
+
 # --- Prompt ---
 
 PROMPT_FILE = os.path.join(CONFIG_DIR, 'prompt_descricao.txt')
@@ -368,15 +514,31 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def handle_api_get(self):
+        # Parse path and query string
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+
         routes = {
             '/api/status': api_status,
             '/api/videos': api_videos,
             '/api/config': api_config,
             '/api/sync-status': api_sync_status,
             '/api/prompt': api_prompt_get,
+            '/api/publicados': lambda: api_publicados(),
             '/api/scheduler-status': lambda: json.load(open(os.path.join(PROJECT_DIR, 'dashboard', 'scheduler_status.json'))) if os.path.exists(os.path.join(PROJECT_DIR, 'dashboard', 'scheduler_status.json')) else {'state': 'stopped'},
         }
-        handler = routes.get(self.path)
+
+        # Special route with query param
+        if path == '/api/video' and 'id' in params:
+            try:
+                result = api_video_detail_get(params['id'][0])
+                self.send_json(result)
+            except Exception as e:
+                self.send_json({'error': str(e)}, 500)
+            return
+
+        handler = routes.get(path)
         if handler:
             try:
                 result = handler()
@@ -399,6 +561,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             '/api/prompt': api_prompt_save,
             '/api/analyze': api_analyze,
             '/api/publish': api_publish,
+            '/api/video/delete': api_delete_video,
+            '/api/privacy': api_change_privacy,
+            '/api/publication/delete': api_delete_publication,
         }
         handler = routes.get(self.path)
         if handler:

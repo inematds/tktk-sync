@@ -265,6 +265,24 @@ for i, row in enumerate(data.get('values', [])):
 # --- Publish one video ---
 publish_video() {
   local vid="$1"
+
+  # Verifica se já foi publicado
+  local current_status
+  current_status=$(sheets_get "VIDEOS!A2:L1000" 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for row in data.get('values', []):
+    if row and row[0] == '$vid' and len(row) > 11:
+        print(row[11])
+        sys.exit(0)
+print('unknown')
+" 2>/dev/null)
+
+  if [[ "$current_status" == "published" ]]; then
+    echo "  [skip] ${vid} — já publicado"
+    return 0
+  fi
+
   echo "  [publish] ${vid}"
 
   case "$PLATFORM" in

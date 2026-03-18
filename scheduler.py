@@ -132,32 +132,44 @@ def run_script(script_name, args, timeout=600):
 # --- Pipelines ---
 
 def pipeline_sync(config):
-    """Sincroniza novos vídeos do TikTok."""
+    """Fila 1: Sincroniza metadados do TikTok (rápido, sem download)."""
     channel = config.get('tiktok_channel', '')
-    max_per_run = config.get('sync_max_por_vez', '10')
-
     if not channel:
         log('  Sync: canal não configurado')
         return
 
-    log(f'  Sync: {channel} (max {max_per_run})')
+    log(f'  Sync: {channel}')
     update_status('syncing', f'Sincronizando {channel}...', 'sync')
 
-    rc, stdout, stderr = run_script('tk-sync', [channel, '--last', max_per_run])
+    rc, stdout, stderr = run_script('tk-sync', [channel])
 
     if rc == 0:
-        # Conta novos
         for line in stdout.split('\n'):
-            if 'Novos:' in line:
+            if 'Novos:' in line or 'registrados' in line:
                 log(f'  Sync: {line.strip()}')
     else:
         log(f'  Sync: erro (rc={rc})')
-        if stderr:
-            log(f'  {stderr[:200]}')
+
+
+def pipeline_download(config):
+    """Fila 2: Baixa vídeos pendentes (roda em background)."""
+    max_per_run = config.get('sync_max_por_vez', '10')
+
+    log(f'  Download: max {max_per_run} vídeos')
+    update_status('downloading', 'Baixando vídeos...', 'download')
+
+    rc, stdout, stderr = run_script('tk-download', ['--max', max_per_run], timeout=1800)
+
+    if rc == 0:
+        for line in stdout.split('\n'):
+            if 'Download:' in line or 'OK' in line:
+                log(f'  {line.strip()}')
+    else:
+        log(f'  Download: erro (rc={rc})')
 
 
 def pipeline_analyze(config):
-    """Analisa vídeos baixados."""
+    """Fila 3a: Analisa vídeos baixados."""
     log('  Analyze: processando vídeos downloaded...')
     update_status('analyzing', 'Analisando vídeos...', 'analyze')
 
@@ -169,20 +181,17 @@ def pipeline_analyze(config):
                 log(f'  Analyze: {line.strip()}')
     else:
         log(f'  Analyze: erro (rc={rc})')
-        if stderr:
-            log(f'  {stderr[:200]}')
 
 
 def pipeline_publish(config):
-    """Publica vídeos analisados."""
+    """Fila 3b: Publica vídeos analisados."""
     max_per_run = config.get('pub_max_por_vez', '3')
     privacy = config.get('privacy_padrao', 'unlisted')
 
     log(f'  Publish: max {max_per_run}, privacy={privacy}')
     update_status('publishing', 'Publicando vídeos...', 'publish')
 
-    # Busca vídeos analyzed da planilha
-    result = sheets_get('VIDEOS!A2:L1000')
+    result = sheets_get('VIDEOS!A2:L2000')
     rows = result.get('values', [])
     analyzed_ids = [r[0] for r in rows if len(r) > 11 and r[11] == 'analyzed']
 
@@ -209,11 +218,33 @@ executed_today = {
 last_date = datetime.now().strftime('%Y-%m-%d')
 
 
+def download_worker():
+    """Thread contínua de download — roda independente, checa pendentes a cada 30s."""
+    log('Download worker iniciado')
+    while True:
+        try:
+            config = load_config()
+            max_dl = config.get('sync_max_por_vez', '10')
+            rc, stdout, stderr = run_script('tk-download', ['--max', max_dl], timeout=1800)
+            if rc == 0 and stdout:
+                for line in stdout.split('\n'):
+                    if 'OK' in line or 'downloaded' in line.lower():
+                        log(f'  DL: {line.strip()}')
+        except Exception as e:
+            log(f'Download worker erro: {e}')
+        time.sleep(30)
+
+
 def main_loop():
     global executed_today, last_date
 
-    log('tktk Scheduler iniciado')
+    log('tktk-Sync Scheduler iniciado')
     update_status('idle', 'Aguardando...')
+
+    # Inicia download worker em thread separada
+    dl_thread = threading.Thread(target=download_worker, daemon=True)
+    dl_thread.start()
+    log('Download worker thread iniciada')
 
     while True:
         try:
@@ -223,35 +254,33 @@ def main_loop():
                 executed_today = {'sync': set(), 'pub': set()}
                 last_date = today
 
-            # Carrega config
             config = load_config()
-
             now_hm = datetime.now().strftime('%H:%M')
 
-            # --- Pipeline Sync ---
+            # --- Fila 1: Sync (1x por dia no horário configurado) ---
             sync_paused = config.get('pipeline_sync_paused', 'true') == 'true'
-            sync_auto = config.get('sync_auto', 'false') == 'true'
 
-            if not sync_paused and sync_auto:
+            if not sync_paused:
                 sync_horarios = config.get('sync_horarios', '')
                 match = get_matching_schedule(sync_horarios)
                 if match and match not in executed_today['sync']:
                     executed_today['sync'].add(match)
                     log(f'==> Sync agendado ({match})')
                     pipeline_sync(config)
-                    # Após sync, analisa automaticamente
-                    pipeline_analyze(config)
 
-            # --- Pipeline Publish ---
+            # --- Fila 2: Download roda contínuo na thread separada ---
+            # (gerenciado pelo download_worker acima)
+
+            # --- Fila 3: Analyze + Publish nos horários ---
             pub_paused = config.get('pipeline_pub_paused', 'true') == 'true'
-            pub_auto = config.get('pub_auto', 'false') == 'true'
 
-            if not pub_paused and pub_auto:
+            if not pub_paused:
                 pub_horarios = config.get('pub_horarios', '')
                 match = get_matching_schedule(pub_horarios)
                 if match and match not in executed_today['pub']:
                     executed_today['pub'].add(match)
-                    log(f'==> Publish agendado ({match})')
+                    log(f'==> Analyze + Publish agendado ({match})')
+                    pipeline_analyze(config)
                     pipeline_publish(config)
 
             update_status('idle', f'Próximo check: {now_hm}')
